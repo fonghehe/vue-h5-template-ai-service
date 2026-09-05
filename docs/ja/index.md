@@ -1,47 +1,32 @@
 ---
 layout: home
-
 hero:
-  name: "ai-service"
-  text: "vue-h5-template のストリーミング AI"
-  tagline: 型付きメッセージリストを Server-Sent Events ストリームに変換する、プロバイダー中立な AI サービス。
+  name: "vue-h5-template-ai-service"
+  text: "AI アシスタントのバックエンド"
+  tagline: FastAPI による会話保存、コンテキスト制限、ツール、互換 SSE ストリーミング。
   actions:
     - theme: brand
       text: クイックスタート
       link: /ja/quickstart
     - theme: alt
-      text: SSE 契約
-      link: /ja/sse
+      text: アーキテクチャ
+      link: /ja/architecture
     - theme: alt
-      text: GitHub で見る
-      link: https://github.com/fonghehe/vue-h5-template-ai-service
-
+      text: API
+      link: /ja/api
 features:
-  - title: プロバイダー中立
-    details: モデルアクセスは <code>ChatProvider</code> インターフェースの背後にあり、オフラインのモックと任意の OpenAI 互換エンドポイントを、トランスポートに手を加えず入れ替えられます。
-  - title: SSE を標準搭載
-    details: <code>start</code>、<code>delta</code>、<code>finish</code> イベントを発行し、<code>@vh5/ai-chat</code> が直接消費します。
-  - title: 共有アイデンティティ
-    details: Go のビジネスサービスが発行した同じ JWT を検証するため、ログイン済みユーザーはここでも認証済みです。
-  - title: 運用即応
-    details: 非 root Docker イメージ、ヘルス/レディネスプローブ、Redis 対応レート制限、構造化ログ、GitHub Actions CI。
+  - title: 既存クライアントとの互換性
+    details: POST /api/ai/chat は @vh5/ai-chat の start、delta、finish、error を維持します。
+  - title: サーバー管理の会話
+    details: JWT による履歴、要約、使用量記録と会話単位の順序制御。
+  - title: 境界のあるエージェント
+    details: ツールが必要な処理だけ LangGraph を使い、通常のチャットは直接ストリームします。
+  - title: 小規模ナレッジベース
+    details: txt、md、pdf を登録し、PostgreSQL/pgvector で検索して出典を返します。
 ---
 
-## なぜ別サービスなのか？
+## このリポジトリの責務
 
-これは vue-h5-template バックエンドペアのストリーミング側です：
+これは Python の AI サービスで、Vue フロントエンドではありません。別の Go ビジネスサービスがログイン、JWT 発行、商品 CRUD を担当します。このサービスは JWT を検証し、AI 会話を保存し、登録済みツールを通じてのみ Go の商品 API を呼びます。`src/`、画面ルーター、フロントエンド store、ブラウザテーマ、i18n、モバイルレイアウトはありません。
 
-| | ビジネスサービス (Go) | AI サービス (Python) |
-|---|---|---|
-| ワークロード | 短いトランザクション CRUD | 長時間のストリーミング |
-| スケーリング | リクエストレート | 同時ストリーム数 |
-| 障害モード | データベース遅延 | 上流モデルの遅延 |
-
-分離しておくことで、遅いモデルプロバイダーがログインやカタログを提供する接続プールを使い果たすことはありません。
-
-## パイプライン
-
-```
-Vue H5 アプリ ──POST /api/ai/chat──▶ ai-service ──▶ モックプロバイダー        (開発)
-        ◀── SSE: start/delta/finish ──┘         └─▶ OpenAI 互換  (本番)
-```
+[開始手順](/ja/quickstart)、[アーキテクチャ](/ja/architecture)、[API](/ja/api) の順に参照してください。オフライン Mock は通信経路を確認するためのもので、実際のモデル品質や Go 連携の稼働を証明しません。

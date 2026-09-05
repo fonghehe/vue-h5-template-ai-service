@@ -1,46 +1,43 @@
 # Architecture
 
-The service is an application-factory FastAPI app with process-wide dependencies created and disposed in the
-lifespan hook.
+The repository has no frontend `src/`, pages, client router, stores, composables, UI components, CSS theme or frontend API wrapper. `@vh5/ai-chat` lives elsewhere and consumes this service's legacy SSE endpoint. This repository is the FastAPI half of the backend pair.
 
+```text
+Vue / @vh5/ai-chat -> POST /api/ai/chat -> FastAPI -> LLMProvider -> SSE
+Go business service -> JWT issuer / product API
+JWT user -> /api/conversations/{id}/messages -> ContextBuilder -> direct LLM stream
+                                                    | mode=agent / auto trigger
+                                                    v
+                                               LangGraph -> ToolRegistry
+                                                              |
+                                                        search_product -> Go
+JWT user -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
+Redis -> request counter, stream quota, conversation lock
 ```
-app/main.py            app factory, lifespan, middleware, exception handlers
-app/core/config.py     fail-fast settings
-app/core/security.py   principal resolution (service / user / anonymous)
-app/core/errors.py     error codes (aligned with the business service)
-app/core/logging.py    JSON / text logging with request scope
-app/providers/         ChatProvider abstraction + factory (mock / openai-compatible)
-app/schemas/           request + SSE chunk + envelope models
-app/services/          rate limiter (memory / redis)
-app/api/v1/            routes (chat, system)
-```
 
-## Request lifecycle
+## Actual module boundaries
 
-1. **Trusted host + CORS + request-context middleware** assign a correlation id and emit one access-log line per
-   request.
-2. **Authentication** resolves the principal: service token → user JWT → anonymous.
-3. **The handler** validates input, enforces the rate limit, then streams provider fragments as SSE frames.
-4. **Exception handlers** map `AppError` and `RequestValidationError` onto the shared JSON envelope.
+| Path | Responsibility |
+|---|---|
+| `app/main.py` | FastAPI factory, lifespan dependencies, middleware and error envelope |
+| `app/api/v1/` | HTTP/SSE routes only: chat, conversations, knowledge, usage and probes |
+| `app/schemas/` | Pydantic request/response models and SSE frame types |
+| `app/core/` | settings, JWT, errors, logging and observability |
+| `app/providers/` | provider-neutral LLM/embedding interfaces and mock/HTTP adapters |
+| `app/services/` | context, prompts, model routing, LangGraph, retrieval, quotas and cancellation |
+| `app/tools/` | allow-listed Pydantic-validated tools |
+| `app/db/` | SQLAlchemy async models, sessions and owner-scoped repositories |
+| `alembic/` | PostgreSQL migrations; `evals/` contains a small offline smoke dataset |
+| `tests/` | pytest behavior and contract tests |
 
-## Provider abstraction
+## Request flow
 
-Model access sits behind `ChatProvider`:
+`create_app()` installs trusted-host and CORS middleware, a request ID, API routes and exception handlers. Lifespan creates the provider, embedding adapter, database, limiter, locks, tool registry and workflow. The legacy `/api/ai/chat` accepts client-supplied `messages[]` and does not persist them. The newer conversation route authorizes a JWT subject, saves the user message, builds a bounded context, then streams or runs the agent. A completed turn saves one assistant message and a `UsageRecord`. A disconnect can leave a saved user message without an assistant reply; consumers must tolerate that state.
 
-- `MockChatProvider` — a canned stream, so the whole transport works offline in development and tests.
-- `OpenAICompatibleProvider` — any OpenAI-compatible endpoint via `httpx`.
+The JSON error envelope is `{code,message,data,error,requestId}`. Once SSE headers are sent, errors use an `error` frame. Read [SSE](/sse) for the exact wire format.
 
-The factory (`app/providers/factory.py`) selects one at startup from `AI_PROVIDER`; swapping providers changes
-nothing in the transport or the frontend.
+## Data and service boundaries
 
-## Streaming behaviour
+PostgreSQL stores conversations, messages, documents, chunks, embeddings and usage. The migration enables `vector`; SQLite is a local/test fallback with JSON vectors and in-process cosine search. Redis is optional locally; without it, rate counters, stream quota and conversation locks are per process. For multiple replicas, configure Redis. The separate Go service issues JWTs and serves products; this repo does not implement its CRUD. The product tool uses one configured base URL and a fixed `/api/v1/products` path, not a model-selected URL. Live compatibility with a particular Go deployment must be checked separately.
 
-- The stream emits `start`, zero or more `delta`, then `finish`.
-- The handler polls `request.is_disconnected()` between fragments and aborts early when the browser navigates away,
-  avoiding paid-for tokens nobody reads.
-- A failure mid-stream is reported as an `error` event with a client-safe message — provider internals never leak.
-
-## Cross-service identity
-
-`JWT_SECRET`, `JWT_ISSUER` and `JWT_AUDIENCE` must match the business service, so a user who logged in there is
-already authenticated here. A `SERVICE_TOKEN` additionally lets a trusted gateway call on behalf of its own users.
+See [Conversations](/conversations), [Agent and RAG](/agent-rag), and [Extending](/extending).

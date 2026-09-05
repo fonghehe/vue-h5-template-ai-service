@@ -1,63 +1,48 @@
 # 快速开始
 
-用离线 mock provider 在本地把 AI 服务跑起来 —— 无需 API Key。
+## 环境
 
-## 前置条件
+API 使用 Python 3.12–3.14 和 uv。只有 VitePress 文档需要 Node.js/npm。根目录是 `pyproject.toml` + `uv.lock` 的 Python 项目；`package.json` / `package-lock.json` 位于 `docs/`，根目录没有 pnpm 文档脚本。
 
-- **Python 3.12–3.14**
-- **[uv](https://docs.astral.sh/uv/)** —— 包与环境管理器。
-
-## 安装并运行
+## 离线启动
 
 ```bash
 cp .env.example .env
-uv sync       # 从冻结的 lockfile 安装依赖
-make dev      # 以 autoreload 模式在 :8001 运行
+uv sync --dev
+uv run uvicorn app.main:app --reload --port 8001
 ```
 
-`make dev` 执行 `uv run uvicorn app.main:app --reload --port 8001`。默认 `AI_PROVIDER=mock` 时服务返回预置的
-流式内容，无需上游账号即可验证整条传输链路。
-
-## 试用
+默认使用 Mock Provider 和 `.data/ai-service.db` SQLite 文件，启动时自动建表；这是本地开发回退方案，不是生产 PostgreSQL/pgvector。启用 `DOCS_ENABLED` 时可打开 `http://localhost:8001/docs`。
 
 ```bash
-curl -N http://localhost:8001/api/ai/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"为什么流式很有用？"}]}'
+curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"你好"}]}'
 ```
 
-```text
-data: {"type":"start","id":"conversation-9f2c…"}
-data: {"type":"delta","delta":"Streaming "}
-data: {"type":"delta","delta":"keeps the UI honest. "}
-data: {"type":"finish","reason":"stop"}
-```
+响应为 `start`、若干 `delta`、`finish`。Mock 返回预置文本，并不会真正回答问题。
 
-交互式 OpenAPI 文档在 `http://localhost:8001/docs`。
+## 持久化会话
 
-## 切换到真实供应商
-
-任意 OpenAI 兼容端点均可（OpenAI、Azure OpenAI、Together、Groq、Ollama、vLLM）：
+即使 `AI_AUTH_REQUIRED=false`，会话与知识库接口仍要求由 Go 业务服务签发的**用户 JWT**；`SERVICE_TOKEN` 不能访问用户数据。本服务不签发 JWT。拿到有效令牌后：
 
 ```bash
-AI_PROVIDER=openai-compatible
-AI_BASE_URL=https://api.openai.com/v1
-AI_API_KEY=sk-…
-AI_MODEL=gpt-4o-mini
+curl -s http://localhost:8001/api/conversations -H "Authorization: Bearer $AI_USER_JWT" -H 'Content-Type: application/json' -d '{"title":"第一次对话"}'
 ```
 
-完整清单见 [配置参考](/zh/configuration)。
+将返回的 `data.id` 用于 `POST /api/conversations/{id}/messages`。完整流程见[会话与上下文](/zh/conversations)。
 
-## 开发循环
+## Compose 与检查
+
+`docker compose up --build` 会启动 API、Redis、PostgreSQL/pgvector，并先运行 Alembic；Compose 设置 `AI_AUTH_REQUIRED=true`，所以上面的匿名 curl 在 Compose 中会得到 401。Go 服务不包含在本 Compose 中。参见[部署](/zh/deployment)。
 
 ```bash
-make check     # lint + typecheck + test
-make test      # pytest
-make typecheck # mypy --strict
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+cd docs
+npm ci
+npm run docs:dev
+npm run docs:build
 ```
 
-## 下一步
-
-- [SSE 契约](/zh/sse) —— 精确的事件结构。
-- [API 参考](/zh/api) —— 端点与响应信封。
-- [部署指南](/zh/deployment) —— 生产注意事项，尤其是代理缓冲。
+VitePress 开发服务器不会启动 API。配置详情见[配置参考](/zh/configuration)。

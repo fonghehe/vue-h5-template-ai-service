@@ -21,9 +21,18 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import CODE_INTERNAL, CODE_VALIDATION, AppError
 from app.core.logging import configure_logging
-from app.providers.factory import create_chat_provider
+from app.core.observability import configure_tracing, span
+from app.db.session import Database
+from app.providers.factory import create_chat_provider, create_embedding_provider
 from app.schemas.envelope import ApiResponse
+from app.services.agent import AgentWorkflow
+from app.services.context import ContextBuilder
+from app.services.locks import ConversationLockManager, StreamQuota
+from app.services.model_router import ModelRouter
+from app.services.prompts import PromptRegistry
 from app.services.rate_limit import build_rate_limiter
+from app.tools.base import ToolRegistry
+from app.tools.builtin import CalculatorTool, CurrentTimeTool, ProductSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +44,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create and dispose of process-wide dependencies."""
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
+    if settings.otel_enabled:
+        configure_tracing(settings.otel_service_name)
 
+    app.state.settings = settings
     app.state.chat_provider = create_chat_provider(settings)
+    app.state.embedding_provider = create_embedding_provider(settings)
     app.state.rate_limiter = build_rate_limiter(settings.redis_url)
+    app.state.database = Database.create(settings.database_url)
+    if settings.database_auto_create:
+        await app.state.database.create_schema()
+    app.state.model_router = ModelRouter(settings)
+    app.state.prompt_registry = PromptRegistry()
+    app.state.context_builder = ContextBuilder(
+        app.state.chat_provider,
+        app.state.model_router,
+        app.state.prompt_registry,
+        token_budget=settings.ai_context_token_budget,
+    )
+    app.state.conversation_locks = ConversationLockManager(settings.redis_url)
+    app.state.stream_quota = StreamQuota(settings.redis_url)
+    app.state.tool_registry = ToolRegistry(
+        [
+            CurrentTimeTool(),
+            CalculatorTool(),
+            ProductSearchTool(
+                base_url=settings.business_service_url,
+                service_token=settings.business_service_token,
+                timeout=settings.business_service_timeout_seconds,
+            ),
+        ]
+    )
+    app.state.agent_workflow = AgentWorkflow(
+        app.state.chat_provider,
+        app.state.tool_registry,
+        app.state.model_router,
+        settings.agent_max_iterations,
+    )
 
     logger.info(
         "ai service starting",
@@ -53,7 +96,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await app.state.rate_limiter.aclose()
+        await app.state.stream_quota.aclose()
+        await app.state.conversation_locks.aclose()
+        await app.state.embedding_provider.aclose()
         await app.state.chat_provider.aclose()
+        await app.state.database.aclose()
         logger.info("ai service stopped")
 
 
@@ -81,7 +128,7 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origin_list,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=[REQUEST_ID_HEADER],
     )
@@ -101,7 +148,8 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
         started = time.perf_counter()
         try:
-            response = await call_next(request)
+            with span("http.request", method=request.method, path=request.url.path, request_id=request_id):
+                response = await call_next(request)
         except Exception:
             # Unhandled errors are logged here so that even a crash before the
             # exception handlers run still leaves a trace with the request id.

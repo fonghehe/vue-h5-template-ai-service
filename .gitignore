@@ -7,6 +7,9 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+# Local SQLite fallback and Python package builds
+.data/
+dist/
 
 # Tooling caches and virtualenvs
 .venv/

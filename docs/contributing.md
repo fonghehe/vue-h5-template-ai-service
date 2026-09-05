@@ -1,49 +1,25 @@
 # Contributing
 
-Thanks for your interest in contributing. This document covers the workflow; behaviour expectations live in
-[CODE_OF_CONDUCT.md](https://github.com/fonghehe/vue-h5-template-ai-service/blob/main/CODE_OF_CONDUCT.md).
-
-## Setup
-
 ```bash
-git clone https://github.com/fonghehe/vue-h5-template-ai-service.git
-cd vue-h5-template-ai-service
 cp .env.example .env
-uv sync
+uv sync --dev
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+uv run python -m evals.run
 ```
 
-Requires Python 3.12–3.14 and [uv](https://docs.astral.sh/uv/).
+`pyproject.toml` defines strict mypy and ruff checks. Tests use mocks; no real OpenAI key is needed. For schema changes, add an Alembic migration. See [Extending](/extending) for endpoints, providers and tools.
 
-## Development commands
+The VitePress project is in `docs/`: English `/`, Chinese `/zh/`, Japanese `/ja/`. Keep the three versions and sidebar aligned.
 
 ```bash
-make check     # lint + typecheck + test
-make lint      # ruff check + ruff format --check
-make typecheck # mypy --strict
-make test      # pytest
-make format    # ruff format + ruff check --fix
+cd docs
+npm ci
+npm run docs:dev
+npm run docs:typecheck
+npm run docs:build
 ```
 
-## Code style
-
-- Formatting and linting are enforced by **ruff** (config in `pyproject.toml`).
-- Type checking runs **mypy in strict mode**.
-- Schemas in `app/schemas/` are the contract with `@vh5/ai-chat` — renaming a field is a breaking change.
-
-## Adding a provider
-
-1. Implement `ChatProvider` in `app/providers/`.
-2. Register it in `app/providers/factory.py`.
-3. Add tests under `tests/`.
-4. Update the `AI_PROVIDER` docs in the configuration reference.
-
-## Pull request checklist
-
-1. Add or update tests.
-2. Run `make check` locally and keep it green.
-3. Keep the SSE event shapes and the response envelope unchanged unless deliberately versioning them.
-4. Update the docs when the surface changes.
-
-## Releasing
-
-Bump the version in `pyproject.toml` and tag the release.
+There is no pnpm docs script at the root. VitePress local search is enabled and build checks internal links. SSE/provider contract changes also need tests and docs updates per `AGENTS.md`. Never commit real JWTs, model credentials or user documents.

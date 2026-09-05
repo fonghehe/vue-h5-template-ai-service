@@ -2,47 +2,33 @@
 layout: home
 
 hero:
-  name: "ai-service"
-  text: "Streaming AI for vue-h5-template"
-  tagline: A provider-neutral AI service that exchanges a typed message list for a Server-Sent Events stream.
+  name: "vue-h5-template-ai-service"
+  text: "AI assistant backend"
+  tagline: FastAPI service for persistent conversations, bounded context and compatible SSE streaming.
   actions:
     - theme: brand
       text: Quick start
       link: /quickstart
     - theme: alt
-      text: The SSE contract
-      link: /sse
+      text: Architecture
+      link: /architecture
     - theme: alt
-      text: View on GitHub
-      link: https://github.com/fonghehe/vue-h5-template-ai-service
+      text: API
+      link: /api
 
 features:
-  - title: Provider-neutral
-    details: Model access sits behind a <code>ChatProvider</code> interface — the offline mock and any OpenAI-compatible endpoint are interchangeable without touching the transport.
-  - title: SSE out of the box
-    details: Emits <code>start</code>, <code>delta</code> and <code>finish</code> events that <code>@vh5/ai-chat</code> consumes directly.
-  - title: Shared identity
-    details: Validates the same JWTs minted by the Go business service, so a logged-in user is already authenticated here.
-  - title: Ops-ready
-    details: Non-root Docker image, health/readiness probes, Redis-backed rate limiting, structured logs, and GitHub Actions CI.
+  - title: Existing client contract
+    details: POST /api/ai/chat keeps the start, delta, finish and error SSE frames used by @vh5/ai-chat.
+  - title: Server-owned conversations
+    details: JWT-scoped messages, summaries, usage records and per-conversation serialization.
+  - title: Bounded agent path
+    details: LangGraph is used for registered tools; ordinary chat stays on a direct async stream.
+  - title: Lightweight knowledge base
+    details: Text, Markdown and PDF ingestion with pgvector retrieval in PostgreSQL and citations.
 ---
 
-## Why a separate service?
+## What this repository owns
 
-This is the streaming half of the vue-h5-template backend pair:
+This is a Python service, not a Vue application. The sibling Go business service owns login, token issuance and product CRUD. This service validates its JWTs, owns AI conversations, and calls the Go product API only through a registered tool. There is no `src/`, page router, frontend store, browser theme, i18n or mobile layout in this repository.
 
-| | Business service (Go) | AI service (Python) |
-|---|---|---|
-| Workload | Short, transactional CRUD | Long-lived streaming |
-| Scaling | Request rate | Concurrent streams |
-| Failure mode | Database latency | Upstream model latency |
-
-Keeping them apart means a slow model provider can never exhaust the connection pool that serves login and the
-catalogue.
-
-## The pipeline
-
-```
-Vue H5 app ──POST /api/ai/chat──▶ ai-service ──▶ mock provider        (development)
-        ◀── SSE: start/delta/finish ──┘         └─▶ OpenAI-compatible  (production)
-```
+Start with [local setup](/quickstart), then read [architecture](/architecture) and the [API reference](/api). The offline mock answers deterministically; it does **not** demonstrate real model quality or validate the live Go integration.

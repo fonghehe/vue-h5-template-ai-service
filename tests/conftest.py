@@ -37,12 +37,18 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         "JWT_SECRET",
         "JWT_ISSUER",
         "JWT_AUDIENCE",
+        "DATABASE_URL",
+        "DATABASE_AUTO_CREATE",
+        "LOG_FORMAT",
     ):
         monkeypatch.delenv(key, raising=False)
 
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
     monkeypatch.setenv("JWT_ISSUER", TEST_ISSUER)
     monkeypatch.setenv("JWT_AUDIENCE", TEST_AUDIENCE)
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("DATABASE_AUTO_CREATE", "true")
+    monkeypatch.setenv("LOG_FORMAT", "text")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

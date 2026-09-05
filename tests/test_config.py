@@ -12,6 +12,8 @@ PRODUCTION_BASE = {
     "DOCS_ENABLED": "false",
     "LOG_FORMAT": "json",
     "CORS_ORIGINS": "https://app.example.com",
+    "DATABASE_URL": "postgresql+asyncpg://postgres:postgres@db:5432/vue_h5_ai",
+    "DATABASE_AUTO_CREATE": "false",
 }
 
 
@@ -39,7 +41,7 @@ def test_valid_production_config_is_accepted(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_defaults_are_development_friendly() -> None:
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.app_env == "development"
     assert settings.ai_provider == "mock"

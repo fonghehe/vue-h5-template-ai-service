@@ -1,51 +1,21 @@
 # Configuration
 
-All configuration is read from the environment (optionally seeded from a `.env` file). Settings are validated
-eagerly: an unsafe combination fails at startup rather than at the first request.
+`Settings` in `app/core/config.py` reads the process environment and optional `.env`. The repository ships **only** `.env.example`: there are no `.env.development` or `.env.production` files. Unknown keys are ignored.
 
-## Full reference
+| Group | Variables and defaults |
+|---|---|
+| Identity | `APP_ENV=development`, `DEBUG=false`, `DOCS_ENABLED=true`, `LOG_LEVEL=INFO`, `LOG_FORMAT=text` |
+| HTTP | `CORS_ORIGINS` (localhost:5173 origins), `TRUSTED_HOSTS` (localhost, 127.0.0.1, testserver) |
+| Storage | `DATABASE_URL=sqlite+aiosqlite:///./.data/ai-service.db`, `DATABASE_AUTO_CREATE=true` |
+| Security | `SERVICE_TOKEN` unset, `AI_AUTH_REQUIRED=false`, `JWT_SECRET` development placeholder, `JWT_ISSUER=vue-h5-template`, `JWT_AUDIENCE=vue-h5-template-api` |
+| Provider | `AI_PROVIDER=mock`, `AI_BASE_URL=https://api.openai.com/v1`, `AI_API_KEY` unset, `AI_MODEL=gpt-4o-mini`, `AI_TIMEOUT_SECONDS=60` |
+| Context/retries | `AI_MAX_OUTPUT_CHARS=20000`, `AI_MAX_INPUT_CHARS=100000`, `AI_CONTEXT_TOKEN_BUDGET=8000`, `AI_SUMMARY_TOKEN_BUDGET=1000`, `AI_PROVIDER_MAX_RETRIES=3`, `AI_RETRY_BASE_SECONDS=0.25` |
+| Routing | `MODEL_SIMPLE_CHAT`, `MODEL_REASONING`, `MODEL_SUMMARIZATION` unset (fall back to `AI_MODEL`); `MODEL_EMBEDDING=text-embedding-3-small`, `EMBEDDING_DIMENSIONS=1536` |
+| Agent/Go | `AGENT_MAX_ITERATIONS=5`, `BUSINESS_SERVICE_URL=http://localhost:8002`, `BUSINESS_SERVICE_TOKEN` unset, `BUSINESS_SERVICE_TIMEOUT_SECONDS=5` |
+| Knowledge | `KNOWLEDGE_MAX_FILE_BYTES=5000000`, `KNOWLEDGE_CHUNK_CHARS=1200`, `KNOWLEDGE_CHUNK_OVERLAP_CHARS=200`, `KNOWLEDGE_TOP_K=5` |
+| Limits | `AI_RATE_LIMIT_PER_MINUTE=20`, `AI_CONCURRENT_STREAM_LIMIT=3`, `AI_DAILY_TOKEN_LIMIT=200000`, `REDIS_URL` unset |
+| Telemetry | `METRICS_ENABLED=true`, `OTEL_ENABLED=false`, `OTEL_SERVICE_NAME=vue-h5-template-ai-service` |
 
-| Variable | Default | Description |
-|---|---|---|
-| `APP_ENV` | `development` | `development` \| `test` \| `production`. |
-| `DEBUG` | `false` | FastAPI debug mode. |
-| `DOCS_ENABLED` | `true` | Serve `/docs`, `/redoc`, `/openapi.json`. |
-| `LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. |
-| `LOG_FORMAT` | `text` | `text` for local dev, `json` (required in production). |
-| `CORS_ORIGINS` | `http://localhost:5173,…` | Comma-separated browser origin allow-list. |
-| `TRUSTED_HOSTS` | `localhost,127.0.0.1,testserver` | Allowed `Host` header values. |
-| `SERVICE_TOKEN` | — | Shared secret for gateway-to-service calls. Required in production. |
-| `AI_AUTH_REQUIRED` | `false` | When `true`, anonymous access is refused. |
-| `JWT_SECRET` | dev placeholder | **Must** match the business service. |
-| `JWT_ISSUER` | `vue-h5-template` | Must match the business service. |
-| `JWT_AUDIENCE` | `vue-h5-template-api` | Must match the business service. |
-| `AI_PROVIDER` | `mock` | `mock` \| `openai-compatible`. |
-| `AI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint. |
-| `AI_API_KEY` | — | Required for `openai-compatible`. |
-| `AI_MODEL` | `gpt-4o-mini` | Model sent to the provider. |
-| `AI_TIMEOUT_SECONDS` | `60` | Provider timeout (0–300). |
-| `AI_MAX_OUTPUT_CHARS` | `20000` | Hard ceiling on a single turn, in characters. |
-| `AI_RATE_LIMIT_PER_MINUTE` | `20` | Per identity, per minute. |
-| `REDIS_URL` | — | Empty = in-process limiter; set for multi-instance runs. |
+JWT validation enforces HS256, `exp`, `iat`, `sub`, issuer and audience. Persistent resources always require a **user** JWT, even if anonymous legacy chat is allowed. Match the Go issuer settings.
 
-## Production validation
-
-When `APP_ENV=production`, startup refuses to run unless:
-
-- `DEBUG` is `false` and `DOCS_ENABLED` is `false`.
-- `LOG_FORMAT` is `json`.
-- `SERVICE_TOKEN` is set.
-- `JWT_SECRET` is not the default placeholder.
-- `AI_API_KEY` is set when `AI_PROVIDER=openai-compatible`.
-- `CORS_ORIGINS` does not contain `*`.
-
-Additionally, enabling `AI_AUTH_REQUIRED` while `JWT_SECRET` is still the placeholder is rejected — otherwise anyone
-could mint a token the service accepts.
-
-## Authentication model
-
-Three caller kinds are recognised, in precedence order:
-
-1. **service** — a trusted gateway presenting `SERVICE_TOKEN`.
-2. **user** — a JWT minted by the business service (`HS256`, issuer/audience/expiry enforced).
-3. **anonymous** — allowed only while `AI_AUTH_REQUIRED` is `false`.
+For `APP_ENV=production`, validation requires `DEBUG=false`, `DOCS_ENABLED=false`, `LOG_FORMAT=json`, nonempty `SERVICE_TOKEN`, non-placeholder `JWT_SECRET`, a PostgreSQL async URL, `DATABASE_AUTO_CREATE=false` and no wildcard CORS. OpenAI-compatible mode also needs `AI_API_KEY`. **Production validation does not require `AI_AUTH_REQUIRED=true`**; explicitly set it before exposure. Changing embedding model/dimensions requires compatible stored vectors and migration planning; it does not reindex automatically. See [Deployment](/deployment).

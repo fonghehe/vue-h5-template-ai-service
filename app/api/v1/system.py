@@ -6,6 +6,8 @@ import logging
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.responses import Response
 
 from app import __version__
 from app.core.security import RateLimiterDep, SettingsDep
@@ -54,3 +56,10 @@ async def ready(request: Request, settings: SettingsDep, limiter: RateLimiterDep
     # dropping chat, but orchestrators should still see it as unhealthy.
     status_code = 200 if limiters_up else 503
     return JSONResponse(status_code=status_code, content=payload.model_dump(by_alias=True))
+
+
+@router.get("/metrics", include_in_schema=False)
+async def metrics(settings: SettingsDep) -> Response:
+    if not settings.metrics_enabled:
+        return Response(status_code=404)
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

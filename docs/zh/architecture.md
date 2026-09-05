@@ -1,42 +1,36 @@
-# 架构说明
+# 架构
 
-服务是一个应用工厂模式的 FastAPI 应用，进程级依赖在 lifespan 钩子中创建与销毁。
+本仓库没有前端 `src/`、页面、客户端路由、store、composable、UI 组件或 CSS 主题。外部 `@vh5/ai-chat` 消费这里的旧 SSE 端点。
 
+```text
+Vue / @vh5/ai-chat -> /api/ai/chat -> FastAPI -> LLMProvider -> SSE
+Go 业务服务 -> 签发 JWT / 商品 API
+用户 JWT -> /api/conversations/{id}/messages -> ContextBuilder -> 直接流式 LLM
+                                                        | agent/auto
+                                                        v
+                                                  LangGraph -> ToolRegistry
+                                                                   |
+                                                     search_product -> Go
+用户 JWT -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
+Redis -> 请求计数、流并发配额、会话锁
 ```
-app/main.py            应用工厂、lifespan、中间件、异常处理器
-app/core/config.py     快速失败配置
-app/core/security.py   主体解析（service / user / anonymous）
-app/core/errors.py     错误码（与业务服务对齐）
-app/core/logging.py    带请求作用域的 JSON / 文本日志
-app/providers/         ChatProvider 抽象 + 工厂（mock / openai-compatible）
-app/schemas/           请求 + SSE chunk + 信封模型
-app/services/          限流器（memory / redis）
-app/api/v1/            路由（chat、system）
-```
 
-## 请求生命周期
+## 模块边界
 
-1. **可信主机 + CORS + 请求上下文中间件** 分配关联 ID，并为每个请求输出一条访问日志。
-2. **认证** 解析主体：service token → 用户 JWT → anonymous。
-3. **处理器** 校验输入、执行限流，然后把供应商片段流式化为 SSE 帧。
-4. **异常处理器** 将 `AppError` 与 `RequestValidationError` 映射到共享 JSON 信封。
+| 路径 | 职责 |
+|---|---|
+| `app/main.py` | FastAPI 工厂、生命周期依赖、中间件、错误信封 |
+| `app/api/v1/` | chat、conversation、knowledge、usage、探针的 HTTP/SSE 边界 |
+| `app/schemas/` | Pydantic 请求、响应、SSE 类型 |
+| `app/core/` | 配置、JWT、错误、日志、观测 |
+| `app/providers/` | LLM/Embedding 中立接口、Mock/HTTP 适配器 |
+| `app/services/` | 上下文、Prompt、模型路由、Agent、检索、配额、取消 |
+| `app/tools/` | 白名单工具和参数校验 |
+| `app/db/` | SQLAlchemy async 模型、会话、按所有者查询 |
+| `alembic/`、`evals/`、`tests/` | 迁移、离线冒烟评估、pytest |
 
-## 供应商抽象
+## 请求与数据流
 
-模型访问封装在 `ChatProvider` 之后：
+`create_app()` 安装 TrustedHost、CORS、请求 ID、路由和异常处理；lifespan 创建 Provider、Embedding、DB、限流器、锁、工具及工作流。旧 `/api/ai/chat` 接受客户端 `messages[]`，不持久化。新会话路由校验 JWT 所有权、保存用户消息、构建受限上下文，再走直接流或 Agent。成功完成后保存一条助手消息和一条用量记录。断连时可能只保留用户消息，客户端需允许这种状态。
 
-- `MockChatProvider` —— 预置流，让整条传输链路在开发与测试中离线可用。
-- `OpenAICompatibleProvider` —— 通过 `httpx` 访问任意 OpenAI 兼容端点。
-
-工厂（`app/providers/factory.py`）在启动时根据 `AI_PROVIDER` 选择供应商；更换供应商不会改变传输层与前端。
-
-## 流式行为
-
-- 流依次发出 `start`、零个或多个 `delta`、最后 `finish`。
-- 处理器在片段之间轮询 `request.is_disconnected()`，浏览器离开时立即中止，避免为无人阅读的 token 付费。
-- 流中途失败以 `error` 事件上报，携带客户端安全的信息 —— 供应商内部细节绝不外泄。
-
-## 跨服务身份
-
-`JWT_SECRET`、`JWT_ISSUER`、`JWT_AUDIENCE` 必须与业务服务一致，这样在那边登录过的用户在这里天然已认证。
-`SERVICE_TOKEN` 额外允许受信网关代表自己的用户调用。
+JSON 错误使用 `{code,message,data,error,requestId}`；SSE 开始后错误改用 `error` 帧。PostgreSQL 保存会话、消息、文档、向量与用量；SQLite 仅作本地/测试回退。未配 Redis 时计数、流配额、锁均为进程内；多副本应配置 Redis。Go 服务不在此仓库，商品工具固定调用配置域名下的 `/api/v1/products`，具体 Go 部署契约需单独验证。继续阅读[会话](/zh/conversations)、[Agent/RAG](/zh/agent-rag)和[扩展](/zh/extending)。

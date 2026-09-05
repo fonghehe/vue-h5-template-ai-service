@@ -1,90 +1,53 @@
 # API 参考
 
-AI 服务暴露三个端点。非流式响应（以及流开始前的错误）使用与 Go 业务服务相同的信封。
+本地 Base URL 为 `http://localhost:8001`。普通 JSON 成功和流开始前错误使用 `{ "code":0, "message":"ok", "data":..., "error":null, "requestId":"..." }`；非零 code 为错误。SSE 不用该信封。响应头含 `X-Request-ID`。`/docs`、`/openapi.json` 仅在 `DOCS_ENABLED=true` 时开放。
 
-## 响应信封
-
-```jsonc
-{ "code": 0,     "message": "ok", "data": { "…": "…" }, "error": null, "requestId": "…" }
-{ "code": 4010,  "message": "Authentication required", "data": null, "error": null, "requestId": "…" }
-```
-
-`code === 0` 表示成功 —— 与 `@vh5/api-client` 采用相同的分支。
-
-## 端点
-
-| 方法 | 路径 | 鉴权 | 说明 |
+| 方法 | 路径 | 身份 | 响应 |
 |---|---|---|---|
-| `GET` | `/health` | — | 存活探针；不触碰任何依赖。 |
-| `GET` | `/ready` | — | 就绪探针；报告限流器健康度。 |
-| `POST` | `/api/ai/chat` | 可选 | 以 Server-Sent Events 流式返回补全结果。 |
+| GET | `/health` | 公开 | 进程存活 |
+| GET | `/ready` | 公开 | 限流器就绪；降级为 503 |
+| GET | `/metrics` | 开启时公开 | Prometheus，关闭则 404 |
+| POST | `/api/ai/chat` | 允许时用户/服务/匿名 | 旧 SSE，不持久化 |
+| POST、GET | `/api/conversations` | 用户 JWT | 创建/列表 |
+| GET、DELETE | `/api/conversations/{id}` | 所有者 JWT | 详情/删除 |
+| POST | `/api/conversations/{id}/messages` | 所有者 JWT | 持久化 SSE |
+| POST、GET | `/api/knowledge/documents` | 用户 JWT | 上传/列表 |
+| DELETE | `/api/knowledge/documents/{id}` | 所有者 JWT | 删除 |
+| GET | `/api/usage/me` | 用户 JWT | 汇总与分组 |
 
-### POST /api/ai/chat
+## 旧聊天端点
 
-**Body**
-
-```jsonc
-{
-  "messages": [
-    { "role": "user", "content": "为什么流式很有用？", "id": "…", "createdAt": 1700000000 }
-  ],
-  "conversationId": "conversation-9f2c…" // 可选
-}
+```bash
+curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"你好"}]}'
 ```
 
-- `role` 为 `system` | `user` | `assistant`。
-- `messages` 要求 1–100 条；每条 `content` 上限 20000 字符。
-- `id` 与 `createdAt` 可选。
+Body 要求 `messages`（1–100 条），可选 `conversationId`（最多 120 字符）。每条消息有 `role`（`system`、`user`、`assistant`、`tool`）、`content`（最多 20000 字符），以及可选 `id`、`createdAt`、`toolCalls`、`toolCallId`。`tool` 消息必须有 `toolCallId`；空内容必须有 tool call。总内容最多 100000 字符。该端点使用客户端提供的历史，不保存。详见 [SSE](/zh/sse)。
 
-**响应** —— 按 [SSE 契约](/zh/sse) 返回的 `text/event-stream`。
+## 会话
 
-### GET /health
-
-```jsonc
-{
-  "code": 0,
-  "message": "ok",
-  "data": {
-    "service": "ai",
-    "status": "ok",
-    "env": "development",
-    "version": "1.0.0",
-    "provider": "mock",
-    "rateLimiter": "memory"
-  },
-  "error": null,
-  "requestId": "…"
-}
+```bash
+curl -s http://localhost:8001/api/conversations -H "Authorization: Bearer $AI_USER_JWT" -H 'Content-Type: application/json' -d '{"title":"购物咨询"}'
+curl -N "http://localhost:8001/api/conversations/$AI_CONVERSATION_ID/messages" -H "Authorization: Bearer $AI_USER_JWT" -H 'Content-Type: application/json' -d '{"content":"找 500 元以下的商品","mode":"agent","useRag":false}'
 ```
 
-### GET /ready
+创建可提供 `title`（默认 `New conversation`）和 `model`（必须是已配置模型）。消息请求要求 `content`（1–100000 字符），可选 `mode: "auto" | "chat" | "agent"`、`useRag: boolean`，响应为 SSE。详情返回 `id`、`userId`、`title`、`model`、`summary`、`createdAt`、`updatedAt`、`messages`；消息含 `id`、`conversationId`、`role`、`content`、`toolCallId`、`tokenUsage`、`latencyMs`、`citations`、`createdAt`。列表不返回消息。参见[会话](/zh/conversations)。
 
-结构同 `/health`，限流器健康时 `status` 为 `ready`，否则为 `degraded`（HTTP 503）。服务对 chat 是**失败开放**
-的，但编排系统应将降级的限流器视为不健康。
+## 知识库与用量
 
-## 错误码
+```bash
+curl -s http://localhost:8001/api/knowledge/documents -H "Authorization: Bearer $AI_USER_JWT" -F 'file=@notes.md' -F 'metadata={"topic":"catalog"}'
+curl -s http://localhost:8001/api/usage/me -H "Authorization: Bearer $AI_USER_JWT"
+```
 
-| 码 | 含义 | HTTP |
+上传支持 txt、md、pdf；`metadata` 是表单中的 JSON 对象字符串，默认 `{}`。文档响应含 `id`、`title`、`source`、`metadata`、`createdAt`，列表/删除限定所有者。用量返回 `promptTokens`、`completionTokens`、`totalTokens`、`requests` 及 `byModel`、`byConversation`、`byDate`。旧聊天不计入。
+
+## 错误与限制
+
+| code | HTTP | 含义 |
 |---|---|---|
-| `0` | 成功 | 200 |
-| `4000` | 请求错误 | 400 |
-| `4001` | 校验失败 | 422 |
-| `4010` | 未授权 | 401 |
-| `4030` | 禁止访问 | 403 |
-| `4040` | 未找到 | 404 |
-| `4090` | 冲突 | 409 |
-| `4290` | 被限流 | 429 |
-| `5000` | 内部错误 | 500 |
-| `5030` | 供应商不可用 | 502 |
+| 4000 / 4001 | 400 / 422 | 错误请求 / Pydantic 校验 |
+| 4010 / 4030 / 4040 | 401 / 403 / 404 | 认证 / 所有权 / 不存在 |
+| 4090 / 4290 | 409 / 429 | 冲突 / 配额 |
+| 5000 / 5030 | 500 / 502 | 内部错误 / Provider 不可用 |
 
-校验错误只暴露字段**名称** —— 绝不暴露提交的值，因为其中可能包含凭据或个人信息。
-
-## 限流
-
-每个调用方按身份作为配额键：
-
-- 已认证调用方 —— 按 JWT subject；
-- 匿名调用方 —— 按客户端 IP（这样共享 NAT 时一个用户无法耗尽他人的配额）。
-
-限制为每分钟 `AI_RATE_LIMIT_PER_MINUTE`。未设置 `REDIS_URL` 时计数器在进程内；多副本运行时需设置
-`REDIS_URL`。
+校验错误仅暴露字段名，不暴露提交的值。旧端点有每分钟请求与并发流上限；持久化消息还检查当日已记录 token 阈值。参见[配置](/zh/configuration)。`/ready` 只检查限流器。

@@ -23,6 +23,12 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
+
+# Keep the development fallback writable when the image is run without the
+# production PostgreSQL environment. Compose/production use PostgreSQL.
+RUN mkdir -p /app/.data && chown -R app:app /app/.data
 
 ENV PATH="/app/.venv/bin:$PATH"
 

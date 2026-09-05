@@ -14,7 +14,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.errors import AppError, RateLimitError
+from app.core.errors import AppError, RateLimitError, ValidationError
 from app.core.security import (
     ChatProviderDep,
     CurrentPrincipal,
@@ -30,6 +30,7 @@ from app.schemas.chat import (
     StartChunk,
     encode_sse,
 )
+from app.services.streaming import cancel_aware_stream
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 logger = logging.getLogger(__name__)
@@ -52,6 +53,8 @@ async def chat(
     the stream has begun is reported as an `error` event, because the HTTP
     status has already been sent.
     """
+    if sum(len(message.content) for message in payload.messages) > settings.ai_max_input_chars:
+        raise ValidationError("Total message content is too large")
     identity = _rate_limit_identity(principal.subject, principal.kind, request)
     count = await rate_limiter.hit(f"ai:{principal.kind}:{identity}", RATE_LIMIT_WINDOW_SECONDS)
     if count > settings.ai_rate_limit_per_minute:
@@ -59,6 +62,8 @@ async def chat(
         raise RateLimitError()
 
     conversation_id = payload.conversation_id or f"conversation-{uuid4().hex}"
+    if not await request.app.state.stream_quota.acquire(identity, settings.ai_concurrent_stream_limit):
+        raise RateLimitError("Too many concurrent streams")
     logger.info(
         "chat stream started",
         extra={
@@ -71,7 +76,7 @@ async def chat(
     )
 
     return StreamingResponse(
-        _event_stream(request, provider, payload, conversation_id),
+        _event_stream(request, provider, payload, conversation_id, identity),
         media_type="text/event-stream",
         headers={
             # `no-transform` stops intermediaries from buffering or recompressing.
@@ -88,20 +93,14 @@ async def _event_stream(
     provider: ChatProvider,
     payload: ChatRequest,
     conversation_id: str,
+    quota_identity: str,
 ) -> AsyncIterator[str]:
     """Yield SSE frames until the provider finishes or the client disconnects."""
     yield encode_sse(StartChunk(id=conversation_id))
 
     emitted = 0
     try:
-        async for delta in provider.stream(payload.messages):
-            # Stop promptly when the browser navigates away or aborts, instead
-            # of paying for tokens nobody will read.
-            if await request.is_disconnected():
-                logger.info("client disconnected", extra={"conversationId": conversation_id})
-                yield encode_sse(FinishChunk(reason="abort"))
-                return
-
+        async for delta in cancel_aware_stream(request, provider, payload.messages):
             emitted += len(delta)
             if not delta:
                 continue
@@ -112,6 +111,8 @@ async def _event_stream(
         # The generic message keeps provider internals out of the browser.
         yield encode_sse(ErrorChunk(message=_safe_error_message(exc)))
         return
+    finally:
+        await request.app.state.stream_quota.release(quota_identity)
 
     logger.info(
         "chat stream finished",

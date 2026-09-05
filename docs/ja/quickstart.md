@@ -1,63 +1,48 @@
 # クイックスタート
 
-オフラインのモックプロバイダーで AI サービスをローカル実行します — API キーは不要です。
+## 必要な環境
 
-## 前提条件
+API は Python 3.12–3.14 と uv を使います。Node.js/npm は VitePress 文書のためだけに必要です。ルートは `pyproject.toml` と `uv.lock` の Python プロジェクトで、`package.json` と `package-lock.json` は `docs/` の中にあります。ルートに pnpm docs スクリプトはありません。
 
-- **Python 3.12–3.14**
-- **[uv](https://docs.astral.sh/uv/)** — パッケージと環境のマネージャー。
-
-## インストールと実行
+## オフライン起動
 
 ```bash
 cp .env.example .env
-uv sync                 # 固定されたロックファイルから依存関係をインストール
-make dev                # :8001 で自動リロード付きで実行
+uv sync --dev
+uv run uvicorn app.main:app --reload --port 8001
 ```
 
-`make dev` は `uv run uvicorn app.main:app --reload --port 8001` を実行します。デフォルトの `AI_PROVIDER=mock` では
-サービスは固定のストリームを返すため、上流アカウントなしでトランスポート全体をテストできます。
-
-## 試してみる
+デフォルトは Mock Provider と `.data/ai-service.db` の SQLite で、起動時にテーブルを作ります。これはローカル開発用で、本番の PostgreSQL/pgvector 構成ではありません。`DOCS_ENABLED=true` のとき `http://localhost:8001/docs` に OpenAPI UI があります。
 
 ```bash
-curl -N http://localhost:8001/api/ai/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Why is streaming useful?"}]}'
+curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"こんにちは"}]}'
 ```
 
-```text
-data: {"type":"start","id":"conversation-9f2c…"}
-data: {"type":"delta","delta":"Streaming "}
-data: {"type":"delta","delta":"keeps the UI honest. "}
-data: {"type":"finish","reason":"stop"}
-```
+`start`、複数の `delta`、`finish` が返ります。Mock は定型文を返し、実際には質問に答えません。
 
-対話型の OpenAPI ドキュメントは `http://localhost:8001/docs` にあります。
+## 保存される会話
 
-## 実際のプロバイダーへ切り替え
-
-任意の OpenAI 互換エンドポイントが動作します（OpenAI、Azure OpenAI、Together、Groq、Ollama、vLLM）：
+`AI_AUTH_REQUIRED=false` でも、会話とナレッジベースは Go サービスが発行した**ユーザー JWT**を要求します。`SERVICE_TOKEN` ではユーザーデータを操作できません。このサービスは JWT を発行しません。
 
 ```bash
-AI_PROVIDER=openai-compatible
-AI_BASE_URL=https://api.openai.com/v1
-AI_API_KEY=sk-…
-AI_MODEL=gpt-4o-mini
+curl -s http://localhost:8001/api/conversations -H "Authorization: Bearer $AI_USER_JWT" -H 'Content-Type: application/json' -d '{"title":"最初の会話"}'
 ```
 
-完全な一覧は [設定](/ja/configuration) を参照してください。
+返された `data.id` を `POST /api/conversations/{id}/messages` に使います。[会話ガイド](/ja/conversations)を参照してください。
 
-## 開発ループ
+## Compose と検証
+
+`docker compose up --build` は API、Redis、PostgreSQL/pgvector を起動し、Alembic を先に実行します。Compose は `AI_AUTH_REQUIRED=true` なので上記の匿名 curl は 401 になります。Go サービスは含まれません。[デプロイ](/ja/deployment)も参照してください。
 
 ```bash
-make check     # lint + typecheck + test
-make test      # pytest
-make typecheck # mypy --strict
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+cd docs
+npm ci
+npm run docs:dev
+npm run docs:build
 ```
 
-## 次のステップ
-
-- [SSE 契約](/ja/sse) — 正確なイベント形状。
-- [API リファレンス](/ja/api) — エンドポイントとレスポンスエンベロープ。
-- [デプロイ](/ja/deployment) — 本番上の注意点、特にプロキシのバッファリング。
+文書の開発サーバーは API を起動しません。設定は[設定リファレンス](/ja/configuration)へ。

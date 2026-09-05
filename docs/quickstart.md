@@ -1,63 +1,59 @@
 # Quick start
 
-Run the AI service locally with the offline mock provider — no API key required.
+## Requirements
 
-## Prerequisites
+Python 3.12–3.14 and `uv` run the API. Node.js and npm are needed only to work on the VitePress site. The root is a Python project (`pyproject.toml` + `uv.lock`); only `docs/` has `package.json` and `package-lock.json`. There is no pnpm script at the repository root.
 
-- **Python 3.12–3.14**
-- **[uv](https://docs.astral.sh/uv/)** — the package and environment manager.
-
-## Install and run
+## Offline local run
 
 ```bash
 cp .env.example .env
-uv sync                 # install dependencies from the frozen lockfile
-make dev                # run with autoreload on :8001
+uv sync --dev
+uv run uvicorn app.main:app --reload --port 8001
 ```
 
-`make dev` runs `uv run uvicorn app.main:app --reload --port 8001`. With the default `AI_PROVIDER=mock` the service
-answers with a canned stream, so you can test the whole transport without an upstream account.
-
-## Try it
+Defaults use the mock provider and a local SQLite file at `.data/ai-service.db`; schema is created on startup. This is a development fallback, not the production PostgreSQL/pgvector deployment. Open `http://localhost:8001/docs` while `DOCS_ENABLED=true`.
 
 ```bash
 curl -N http://localhost:8001/api/ai/chat \
   -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Why is streaming useful?"}]}'
+  -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-```text
-data: {"type":"start","id":"conversation-9f2c…"}
-data: {"type":"delta","delta":"Streaming "}
-data: {"type":"delta","delta":"keeps the UI honest. "}
-data: {"type":"finish","reason":"stop"}
-```
+The response is `data: {"type":"start",...}`, zero or more `delta` frames, then `finish`. The mock's answer is a canned explanation, not an answer to the question.
 
-Interactive OpenAPI docs are at `http://localhost:8001/docs`.
+## Persistent conversations
 
-## Switch to a real provider
-
-Any OpenAI-compatible endpoint works (OpenAI, Azure OpenAI, Together, Groq, Ollama, vLLM):
+These endpoints require a **user JWT** minted by the Go business service, even when `AI_AUTH_REQUIRED=false`. A `SERVICE_TOKEN` cannot access user-owned conversations. With a valid JWT:
 
 ```bash
-AI_PROVIDER=openai-compatible
-AI_BASE_URL=https://api.openai.com/v1
-AI_API_KEY=sk-…
-AI_MODEL=gpt-4o-mini
+curl -s http://localhost:8001/api/conversations \
+  -H "Authorization: Bearer $AI_USER_JWT" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"First chat"}'
 ```
 
-See [Configuration](/configuration) for the full list.
+Use the returned `data.id` with `POST /api/conversations/{id}/messages`; see [Conversations](/conversations). The service does not issue JWTs.
 
-## Development loop
+## Production-shaped local stack
 
 ```bash
-make check     # lint + typecheck + test
-make test      # pytest
-make typecheck # mypy --strict
+docker compose up --build
 ```
 
-## Next steps
+Compose starts the AI API, Redis and PostgreSQL with pgvector, runs `alembic upgrade head`, and publishes the API on `8001`. It sets `AI_AUTH_REQUIRED=true`, so the anonymous chat curl above returns 401 in Compose. The Go business service is **not** included; `search_product` needs that separate service at the configured URL. See [Deployment](/deployment).
 
-- [The SSE contract](/sse) — the exact event shapes.
-- [API reference](/api) — endpoints and the response envelope.
-- [Deployment](/deployment) — production notes, especially around proxy buffering.
+## Verification and docs
+
+```bash
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+cd docs
+npm ci
+npm run docs:dev
+npm run docs:build
+```
+
+The docs dev server is a separate VitePress process; it does not start the API. CI additionally builds the Docker image. Continue with [Configuration](/configuration).

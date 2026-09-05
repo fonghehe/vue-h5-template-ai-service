@@ -1,44 +1,28 @@
-# SSE 契約
+# SSE プロトコル
 
-`POST /api/ai/chat` は `text/event-stream` を返し、そのイベントは `@vh5/ai-chat` が消費する `ChatChunk` ユニオンと
-正確に一致します。
+両方のチャット API は `text/event-stream` を返し、各フレームは `data:` 行にコンパクト JSON を載せます。名前付き `event:` は使いません。旧 `POST /api/ai/chat` は `@vh5/ai-chat` の 4 種類を維持します。
 
-| `type` | フィールド | 意味 |
+| 型 | フィールド | 経路 |
 |---|---|---|
-| `start` | `id` | ストリーム受理。会話 ID を運びます。 |
-| `delta` | `delta` | テキストの断片 1 つ。順番に連結します。 |
-| `finish` | `reason` | 終端イベント：`stop`、`abort`、`error`。 |
-| `error` | `message` | ストリーミング開始後の失敗。クライアントが例外を投げます。 |
-
-各フレームはコンパクトな JSON を運ぶ単一の `data:` 行です：
+| `start` | `id` | 両方 |
+| `delta` | `delta` テキスト | 両方 |
+| `finish` | `reason` | 両方 |
+| `error` | `message` | 両方 |
+| `thinking_status` | ユーザーに表示可能な `status` | 保存経路 |
+| `tool_start`、`tool_result` | `tool`、`callId`、任意の `result` | Agent |
+| `sources` | 出典配列 | RAG |
 
 ```text
-data: {"type":"start","id":"conversation-9f2c…"}
-data: {"type":"delta","delta":"Streaming "}
+data: {"type":"start","id":"conversation-id"}
+
+data: {"type":"delta","delta":"こんにちは"}
+
 data: {"type":"finish","reason":"stop"}
-```
-
-## 終了理由
-
-- `stop` — プロバイダーが正常に完了。
-- `abort` — クライアントがストリーム途中で切断。未読のトークンに課金されないよう、サービスは即座に停止します。
-- `error` — クライアントライブラリで `FinishChunk` の reason を通じて報告される失敗用に予約。この場合サービス自体が
-  `error` イベントを発行します。
-
-## エラー処理 — ストリームの前 vs 途中
-
-- 最初のバイトより**前**に発生したエラーは、適切な HTTP ステータスとアプリケーションコードを持つ通常の JSON エラー
-  エンベロープとして返されます。
-- ストリーム**途中**で発生したエラーは、HTTP ステータスがすでに送信済みのため `error` イベントになります。
-
-## ヘッダー
-
-レスポンスは、中継装置がストリームをバッファリングするのを防ぐヘッダーを設定します：
 
 ```
-Cache-Control: no-cache, no-transform
-Connection: keep-alive
-X-Accel-Buffering: no
-```
 
-nginx でサービスを前面に置く場合は、`proxy_buffering off;` も設定してください — [デプロイ](/ja/deployment) を参照。
+正常時は `finish: stop` です。schema は `abort` と `error` の reason を許しますが、現行ルートは失敗時に `error` イベントを送ります。切断したクライアントは通常、終端フレームを受け取りません。追加イベントは保存経路にのみあり、旧 API には出ません。
+
+JSON POST と Authorization を使うため `fetch` を利用します。標準 `EventSource` ではこのリクエスト形式を送れません。画面を閉じるときは fetch を中断してください。`cancel_aware_stream` は直接 Provider の待機中の読み取りをキャンセルし、反復子を閉じます。Agent は進捗を送りますが、回答本文はグラフ完了後に分割します。
+
+配信前の入力/認証/制限エラーは HTTP ステータスと JSON エンベロープ、開始後は SSE の `error` になります。`Cache-Control: no-cache, no-transform` と `X-Accel-Buffering: no` が付くので、プロキシでは両チャット経路のバッファリングを無効にしてください。[デプロイ](/ja/deployment)を参照してください。

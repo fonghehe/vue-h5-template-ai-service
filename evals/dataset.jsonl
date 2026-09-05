@@ -1,0 +1,4 @@
+{"id":"tool-product-budget","question":"帮我找 500 元以下的商品","expected_keywords":["商品"],"expected_tool":"search_product","expected_source":null}
+{"id":"tool-calculator","question":"计算 125 * 4","expected_keywords":["500"],"expected_tool":"calculator","expected_source":null}
+{"id":"rag-pricing","question":"alpine camera 的价格是多少？","expected_keywords":["499"],"expected_tool":null,"expected_source":"pricing"}
+{"id":"structured-products","question":"推荐预算内商品并解释原因","expected_keywords":["reason"],"expected_tool":null,"expected_source":null}

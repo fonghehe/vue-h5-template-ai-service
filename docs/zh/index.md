@@ -1,47 +1,32 @@
 ---
 layout: home
-
 hero:
-  name: "ai-service"
-  text: "vue-h5-template 的流式 AI"
-  tagline: 一个供应商中立的 AI 服务，把结构化的消息列表换成 Server-Sent Events 流。
+  name: "vue-h5-template-ai-service"
+  text: "AI 助手后端"
+  tagline: 基于 FastAPI 的会话、受限上下文、工具与兼容 SSE 流式服务。
   actions:
     - theme: brand
       text: 快速开始
       link: /zh/quickstart
     - theme: alt
-      text: SSE 契约
-      link: /zh/sse
+      text: 架构
+      link: /zh/architecture
     - theme: alt
-      text: 在 GitHub 上查看
-      link: https://github.com/fonghehe/vue-h5-template-ai-service
-
+      text: API
+      link: /zh/api
 features:
-  - title: 供应商中立
-    details: 模型访问封装在 <code>ChatProvider</code> 接口之后 —— 离线 mock 与任意 OpenAI 兼容端点可无缝替换，无需改动传输层。
-  - title: 开箱即用 SSE
-    details: 发出 <code>start</code>、<code>delta</code>、<code>finish</code> 事件，<code>@vh5/ai-chat</code> 直接消费。
-  - title: 共享身份
-    details: 校验 Go 业务服务签发的同一套 JWT，登录过的用户在这里天然已认证。
-  - title: 可运维
-    details: 非 root Docker 镜像、健康/就绪探针、Redis 限流、结构化日志、GitHub Actions CI。
+  - title: 保留前端契约
+    details: POST /api/ai/chat 保留 @vh5/ai-chat 使用的 start、delta、finish、error。
+  - title: 服务端会话
+    details: JWT 限定的历史、摘要、用量记录和同一会话的顺序控制。
+  - title: 有边界的 Agent
+    details: 只有工具工作负载走 LangGraph；普通聊天直接流式调用 Provider。
+  - title: 轻量知识库
+    details: txt、md、pdf 入库；PostgreSQL/pgvector 检索并返回来源。
 ---
 
-## 为什么要拆成独立服务？
+## 仓库职责
 
-这是 vue-h5-template 后端的流式半边：
+这是 Python AI 服务，不是 Vue 前端。兄弟 Go 服务负责登录、签发 JWT 和商品 CRUD；本服务验证 JWT、保存 AI 会话，并只通过注册工具访问 Go 商品 API。这里没有 `src/`、页面路由、前端 store、浏览器主题、国际化或移动布局。
 
-| | 业务服务（Go） | AI 服务（Python） |
-|---|---|---|
-| 负载类型 | 短事务型 CRUD | 长连接流式 |
-| 扩容维度 | 请求速率 | 并发流数量 |
-| 故障模式 | 数据库延迟 | 上游模型延迟 |
-
-拆开之后，慢模型供应商永远无法耗尽为登录与商品目录服务的连接池。
-
-## 数据流
-
-```
-Vue H5 app ──POST /api/ai/chat──▶ ai-service ──▶ mock provider        (开发)
-        ◀── SSE: start/delta/finish ──┘         └─▶ OpenAI-compatible  (生产)
-```
+先看[快速开始](/zh/quickstart)、[架构](/zh/architecture)和 [API](/zh/api)。离线 Mock 只验证传输与业务流程，不能证明真实模型质量或 Go 服务已经集成成功。

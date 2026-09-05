@@ -108,3 +108,13 @@ SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
 ChatProviderDep = Annotated[ChatProvider, Depends(get_chat_provider)]
 RateLimiterDep = Annotated[RateLimiter, Depends(get_rate_limiter)]
 CurrentPrincipal = Annotated[Principal, Depends(authenticate)]
+
+
+def require_user(principal: CurrentPrincipal) -> Principal:
+    """Persistent user-owned resources require a concrete JWT subject."""
+    if principal.kind != "user":
+        raise AuthenticationError("A user access token is required")
+    return principal
+
+
+AuthenticatedUser = Annotated[Principal, Depends(require_user)]

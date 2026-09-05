@@ -1,47 +1,36 @@
 # アーキテクチャ
 
-サービスはアプリケーションファクトリー方式の FastAPI アプリで、プロセス全体の依存関係は lifespan フックで生成・破棄されます。
+このリポジトリにはフロントエンドの `src/`、画面、クライアントルーター、store、composable、UI コンポーネント、CSS テーマはありません。別リポジトリの `@vh5/ai-chat` が旧 SSE エンドポイントを利用します。
 
+```text
+Vue / @vh5/ai-chat -> /api/ai/chat -> FastAPI -> LLMProvider -> SSE
+Go ビジネスサービス -> JWT 発行 / 商品 API
+ユーザー JWT -> /api/conversations/{id}/messages -> ContextBuilder -> 直接 LLM ストリーム
+                                                             | agent/auto
+                                                             v
+                                                       LangGraph -> ToolRegistry
+                                                                        |
+                                                          search_product -> Go
+ユーザー JWT -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
+Redis -> リクエスト数、同時ストリーム、会話ロック
 ```
-app/main.py            アプリファクトリー、lifespan、ミドルウェア、例外ハンドラー
-app/core/config.py     フェイルファストな設定
-app/core/security.py   プリンシパル解決（service / user / anonymous）
-app/core/errors.py     エラーコード（ビジネスサービスと整合）
-app/core/logging.py    リクエストスコープ付き JSON / テキストロギング
-app/providers/         ChatProvider 抽象 + ファクトリー（mock / openai-compatible）
-app/schemas/           リクエスト + SSE チャンク + エンベロープモデル
-app/services/          レートリミッター（memory / redis）
-app/api/v1/            ルート（chat, system）
-```
 
-## リクエストライフサイクル
+## モジュール
 
-1. **信頼済みホスト + CORS + リクエストコンテキストのミドルウェア**が相関 ID を割り当て、リクエストごとに
-   アクセスログを 1 行出力します。
-2. **認証**がプリンシパルを解決します：サービス トークン → ユーザー JWT → 匿名。
-3. **ハンドラー**が入力を検証し、レート制限を適用し、プロバイダーの断片を SSE フレームとしてストリーミングします。
-4. **例外ハンドラー**が `AppError` と `RequestValidationError` を共有 JSON エンベロープに写像します。
+| パス | 責務 |
+|---|---|
+| `app/main.py` | FastAPI ファクトリー、lifespan、ミドルウェア、エラー形式 |
+| `app/api/v1/` | chat、conversation、knowledge、usage、probe の HTTP/SSE 境界 |
+| `app/schemas/` | Pydantic の公開契約と SSE フレーム |
+| `app/core/` | 設定、JWT、エラー、ログ、可観測性 |
+| `app/providers/` | 中立的な LLM/Embedding と Mock/HTTP アダプター |
+| `app/services/` | コンテキスト、プロンプト、モデル選択、Agent、検索、制限、キャンセル |
+| `app/tools/` | 許可リストにあるツールと引数検証 |
+| `app/db/` | SQLAlchemy async と所有者を確認するリポジトリ |
+| `alembic/`、`evals/`、`tests/` | マイグレーション、オフライン簡易評価、pytest |
 
-## プロバイダー抽象
+## 処理とデータ
 
-モデルアクセスは `ChatProvider` の背後にあります：
+`create_app()` は TrustedHost、CORS、リクエスト ID、ルート、例外処理を登録します。lifespan は Provider、Embedding、DB、リミッター、ロック、ツール、ワークフローを生成します。旧 `/api/ai/chat` はクライアントの `messages[]` を受け取り保存しません。新しい会話ルートは JWT の所有者を検証し、ユーザーメッセージを保存し、制限付きコンテキストを構築して直接ストリームまたは Agent に送ります。正常終了後にアシスタントメッセージと使用量を保存します。切断後にユーザーメッセージだけ残る場合があります。
 
-- `MockChatProvider` — 固定のストリーム。開発やテストでトランスポート全体をオフライン動作させます。
-- `OpenAICompatibleProvider` — `httpx` 経由の任意の OpenAI 互換エンドポイント。
-
-ファクトリー（`app/providers/factory.py`）が起動時に `AI_PROVIDER` から選択します。プロバイダーを入れ替えても、
-トランスポートやフロントエンドには何も影響しません。
-
-## ストリーミング動作
-
-- ストリームは `start`、0 個以上の `delta`、そして `finish` を発行します。
-- ハンドラーは断片の合間に `request.is_disconnected()` を確認し、ブラウザが離脱したら即座に中止します。
-  これにより誰も読まないトークンへの課金を避けられます。
-- ストリーム途中の失敗は、クライアント安全なメッセージを持つ `error` イベントとして報告されます — プロバイダー内部が
-  漏れることはありません。
-
-## クロスサービスアイデンティティ
-
-`JWT_SECRET`、`JWT_ISSUER`、`JWT_AUDIENCE` はビジネスサービスと一致させる必要があります。これにより、そこでログイン
-したユーザーはここでも認証済みになります。加えて `SERVICE_TOKEN` により、信頼済みゲートウェイが自身のユーザーに代わって
-呼び出せます。
+JSON エラーは `{code,message,data,error,requestId}`、SSE 開始後のエラーは `error` フレームです。PostgreSQL は会話・文書・ベクトル・使用量を保存し、SQLite はローカル/テスト用です。Redis 未設定ならカウンター・ロックはプロセス内だけです。Go サービスはこのリポジトリに含まれず、商品ツールは設定済みベース URL の `/api/v1/products` だけを呼びます。実際の Go 側契約は別途検証が必要です。[会話](/ja/conversations)、[Agent/RAG](/ja/agent-rag)、[拡張](/ja/extending)も参照してください。

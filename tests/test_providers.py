@@ -15,7 +15,7 @@ from app.providers.base import (
     OpenAICompatibleProvider,
 )
 from app.providers.factory import create_chat_provider
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import ChatMessage, ChatToolCall
 
 
 def messages(content: str = "Hello") -> list[ChatMessage]:
@@ -124,6 +124,40 @@ async def test_openai_provider_parses_deltas(monkeypatch: pytest.MonkeyPatch) ->
     assert captured["auth"] == "Bearer sk-test"
     assert captured["body"]["model"] == "m"
     assert captured["body"]["stream"] is True
+
+
+async def test_openai_provider_serializes_tool_call_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "model": "m",
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    patch_client(monkeypatch, httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        base_url="https://api.example.com/v1", api_key="sk-test", model="m", timeout=5.0
+    )
+    await provider.complete(
+        [
+            ChatMessage(role="user", content="2+3"),
+            ChatMessage(
+                role="assistant",
+                content="",
+                toolCalls=[ChatToolCall(id="call-1", name="calculator", arguments={"expression": "2+3"})],
+            ),
+            ChatMessage(role="tool", content='{"result":5}', toolCallId="call-1"),
+        ]
+    )
+    wire = captured["body"]["messages"]  # type: ignore[index]
+    assert wire[1]["tool_calls"][0]["function"]["name"] == "calculator"
+    assert wire[2]["tool_call_id"] == "call-1"
 
 
 async def test_openai_provider_raises_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:

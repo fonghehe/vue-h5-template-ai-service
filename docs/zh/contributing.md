@@ -1,49 +1,25 @@
 # 贡献指南
 
-感谢你有意参与贡献。本文档介绍工作流程；行为准则见
-[CODE_OF_CONDUCT.md](https://github.com/fonghehe/vue-h5-template-ai-service/blob/main/CODE_OF_CONDUCT.md)。
-
-## 环境准备
-
 ```bash
-git clone https://github.com/fonghehe/vue-h5-template-ai-service.git
-cd vue-h5-template-ai-service
 cp .env.example .env
-uv sync
+uv sync --dev
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+uv run python -m evals.run
 ```
 
-需要 Python 3.12–3.14 与 [uv](https://docs.astral.sh/uv/)。
+`pyproject.toml` 定义严格 mypy 和 ruff；测试使用 Mock，不需要真实 OpenAI Key。数据库 schema 变动需 Alembic 迁移。接口、Provider 和工具扩展方法见[扩展指南](/zh/extending)。
 
-## 开发命令
+VitePress 在 `docs/`：英文 `/`、中文 `/zh/`、日文 `/ja/`。保持三语内容及导航同步。
 
 ```bash
-make check     # lint + typecheck + test
-make lint      # ruff check + ruff format --check
-make typecheck # mypy --strict
-make test      # pytest
-make format    # ruff format + ruff check --fix
+cd docs
+npm ci
+npm run docs:dev
+npm run docs:typecheck
+npm run docs:build
 ```
 
-## 代码风格
-
-- 格式化与 lint 由 **ruff** 强制（配置见 `pyproject.toml`）。
-- 类型检查运行 **严格模式 mypy**。
-- `app/schemas/` 中的模型是与 `@vh5/ai-chat` 的契约 —— 重命名字段属于破坏性变更。
-
-## 新增供应商
-
-1. 在 `app/providers/` 中实现 `ChatProvider`。
-2. 在 `app/providers/factory.py` 中注册。
-3. 在 `tests/` 下添加测试。
-4. 更新配置参考中的 `AI_PROVIDER` 文档。
-
-## Pull Request 检查清单
-
-1. 新增或更新测试。
-2. 本地运行 `make check` 并保持全绿。
-3. 保持 SSE 事件结构与响应信封不变，除非有意做版本化。
-4. 接口变化时同步更新文档。
-
-## 发布
-
-在 `pyproject.toml` 中提升版本号并打 tag。
+根目录没有 pnpm docs 脚本。VitePress 已启用本地搜索，构建会检查内部链接。SSE/Provider 契约变更还需按 `AGENTS.md` 更新测试和文档。不要提交真实 JWT、模型密钥或用户文档。
