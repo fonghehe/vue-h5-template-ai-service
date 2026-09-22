@@ -34,7 +34,9 @@ class Conversation(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
-    messages: Mapped[list[Message]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+    messages: Mapped[list[Message]] = relationship(
+        back_populates="conversation", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class Message(Base):
@@ -81,7 +83,9 @@ class Document(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    chunks: Mapped[list[DocumentChunk]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    chunks: Mapped[list[DocumentChunk]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class DocumentChunk(Base):

@@ -9,13 +9,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import chat, conversations, knowledge, system, usage
+from app.api.v1 import chat, conversations, knowledge, suggestions, system, usage
 
 api_router = APIRouter()
-api_router.include_router(system.router, prefix="", tags=["system"])
-api_router.include_router(chat.router)
-api_router.include_router(conversations.router)
-api_router.include_router(knowledge.router)
-api_router.include_router(usage.router)
+api_router.include_router(system.router)
+for prefix in ("/api", "/api/v1"):
+    for domain_router in (chat.router, conversations.router, knowledge.router, usage.router, suggestions.router):
+        api_router.include_router(domain_router, prefix=prefix)
 
 __all__ = ["api_router"]

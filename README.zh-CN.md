@@ -10,7 +10,7 @@
 
 ```bash
 cp .env.example .env
-uv sync --dev
+uv sync --frozen --dev
 uv run uvicorn app.main:app --reload --port 8001
 curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"你好"}]}'
 ```
@@ -30,6 +30,25 @@ uv run ruff format --check .
 uv run mypy app
 cd docs && npm run docs:typecheck && npm run docs:build
 ```
+
+## 架构与维护
+
+支持 Python 3.12–3.14，uv 锁定 FastAPI/Pydantic v2、SQLAlchemy 2 异步、Alembic、Redis、httpx。HTTP 路由调用小型 Service；Repository 只 flush，Service 控制事务。lifespan 在启动失败时也会关闭连接池。支持旧 `/api/*` 和 `/api/v1/*`。详见[审计与改造方案](./ARCHITECTURE_REVIEW.md)及[实际验收报告](./ENGINEERING_REPORT.md)。
+
+## 数据库与部署
+
+本地 SQLite 可自动建表；生产使用 PostgreSQL/pgvector、Redis 和显式迁移：
+
+```bash
+uv run alembic upgrade head
+uv run alembic check
+curl http://localhost:8001/health
+curl http://localhost:8001/ready
+```
+
+启动前配置环境变量。staging/production 强制认证、强密钥、Redis、明确的主机白名单、JSON 日志、关闭文档和 `DATABASE_AUTO_CREATE=false`。每次部署先单独执行迁移，再启动副本。多阶段镜像以非 root 用户运行；代理需关闭 SSE 缓冲、限定受信任代理 IP，关闭宽限期应大于流的截止时间。具体配置见[部署指南](./docs/zh/deployment.md)。JWT 仍由 Go 服务签发，此处不重复建设用户、订单或密码系统。
+
+测试默认使用隔离 SQLite、Mock HTTP/模型。真实集成测试要求 `AI_TEST_DATABASE_URL` 指向可丢弃的 `vh5_ai_test` 数据库，`AI_TEST_REDIS_URL` 使用 Redis DB 15，运行 `uv run pytest -m integration`。CI 提供这些基础设施并验证迁移往返。真实模型质量、Go 联调、追踪 exporter、精确计费均有明确的验证边界。
 
 ## 许可证
 

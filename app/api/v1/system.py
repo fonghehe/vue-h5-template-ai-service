@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Request
@@ -31,7 +32,7 @@ async def health(request: Request, settings: SettingsDep) -> ApiResponse[HealthD
             env=settings.app_env,
             version=__version__,
             provider=settings.ai_provider,
-            rate_limiter=settings.redis_url.rsplit(":", 1)[0] if settings.redis_url else "memory",
+            rate_limiter="redis" if settings.redis_url else "memory",
         ),
         requestId=getattr(request.state, "request_id", None),
     )
@@ -40,11 +41,20 @@ async def health(request: Request, settings: SettingsDep) -> ApiResponse[HealthD
 @router.get("/ready", summary="Readiness probe")
 async def ready(request: Request, settings: SettingsDep, limiter: RateLimiterDep) -> JSONResponse:
     """Report whether the service can serve traffic right now."""
-    limiters_up = await limiter.ping()
+
+    async def probe(call: object) -> bool:
+        try:
+            async with asyncio.timeout(settings.readiness_timeout_seconds):
+                return bool(await call())  # type: ignore[operator]
+        except Exception:
+            return False
+
+    limiters_up, database_up = await asyncio.gather(probe(limiter.ping), probe(request.app.state.database.ping))
+    dependencies_up = limiters_up and database_up
     payload: ApiResponse[HealthData] = ApiResponse(
         data=HealthData(
             service="ai",
-            status="ready" if limiters_up else "degraded",
+            status="ready" if dependencies_up else "degraded",
             env=settings.app_env,
             version=__version__,
             provider=settings.ai_provider,
@@ -52,9 +62,8 @@ async def ready(request: Request, settings: SettingsDep, limiter: RateLimiterDep
         ),
         requestId=getattr(request.state, "request_id", None),
     )
-    # A degraded limiter is not fatal: the service fails open rather than
-    # dropping chat, but orchestrators should still see it as unhealthy.
-    status_code = 200 if limiters_up else 503
+    # Required dependencies fail readiness without exposing connection details.
+    status_code = 200 if dependencies_up else 503
     return JSONResponse(status_code=status_code, content=payload.model_dump(by_alias=True))
 
 

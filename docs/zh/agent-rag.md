@@ -2,7 +2,7 @@
 
 ## 何时进入工作流
 
-`mode="chat"` 直接调用 Provider 流；`agent` 进入 LangGraph；`auto` 仅对商品、计算、时间关键词进入 Agent。`app/services/agent.py` 的图是 `START -> classify -> agent -> (tool -> agent)* -> END`。目前 `classify` 只标记路径，不调用模型做分类。`AGENT_MAX_ITERATIONS` 限制循环。工具进度可流式发出，但最终答案在图完成后才切成 `delta`，**不是**模型逐 token 流。
+`mode="chat"` 使用直接流；`mode="agent"` 使用有界 LangGraph 工具规划，auto 模式由 `app/services/conversations.py` 的商品、计算、时间关键词触发。图选择并执行注册工具后，Provider 真正流式生成最终答案。规划调用最多输出 256 tokens，不展示规划文本。不会先生成完整答案再切片。迭代次数、整流截止时间和输出上限共同限制资源。
 
 ## 工具安全边界
 
@@ -17,3 +17,5 @@
 ## 结构化输出与评估
 
 `LLMProvider.structured_output()` 用 Pydantic 验证；HTTP 适配器遇到无效 JSON 会修复重试一次。`ProductRecommendation` 是 `app/schemas/knowledge.py` 中的示例 schema，当前**没有**公共 API 返回它。`evals/run.py` 只是离线冒烟检查：一个计算器案例和其他 Mock 补全文本非空检查，**不是**定量 RAG 基准。pytest 还覆盖部分检索、工具、结构化输出行为；绿灯不等于真实模型质量合格。
+
+上传 metadata 必须是 JSON 对象；解析在有界工作线程执行，PDF 检查文件签名，文件名只保留 basename，提取文字和分块数量有上限，Embedding 按 64 块批处理。文档与分块原子提交；SQLite 开启外键级联。对不可信 PDF 要求严格隔离时，应使用单独且受资源限制的解析 Worker。

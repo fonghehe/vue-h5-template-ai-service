@@ -11,7 +11,7 @@ help: ## Show available targets
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 sync: ## Install dependencies from the frozen lockfile
-	uv sync --frozen
+	uv sync --frozen --dev
 
 dev: ## Run the server with autoreload
 	uv run uvicorn app.main:app --reload --port 8001
@@ -46,3 +46,13 @@ docker-run: docker ## Run the image with the example environment
 
 clean: ## Remove caches and artifacts
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
+
+.PHONY: migrate migration-check integration
+migrate: ## Upgrade the configured database with Alembic
+	uv run alembic upgrade head
+
+migration-check: ## Detect ORM/migration schema drift
+	uv run alembic check
+
+integration: ## Test isolated PostgreSQL/Redis from AI_TEST_* URLs
+	uv run pytest -m integration

@@ -20,7 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # production, because every token minted with it would be forgeable.
 DEVELOPMENT_JWT_PLACEHOLDER = "dev-only-change-me-before-production"
 
-ServiceEnv = Literal["development", "test", "production"]
+ServiceEnv = Literal["local", "development", "test", "staging", "production"]
 AIProviderName = Literal["mock", "openai-compatible"]
 
 
@@ -31,6 +31,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
 
     # --- Service identity -------------------------------------------------
@@ -49,25 +50,31 @@ class Settings(BaseSettings):
     # --- Persistence ------------------------------------------------------
     # Production uses PostgreSQL + pgvector. SQLite keeps a fresh checkout and
     # the deterministic test suite self-contained.
-    database_url: str = "sqlite+aiosqlite:///./.data/ai-service.db"
+    database_url: str = Field(default="sqlite+aiosqlite:///./.data/ai-service.db", repr=False)
     database_auto_create: bool = True
+    database_pool_size: int = Field(default=5, ge=1, le=100)
+    database_max_overflow: int = Field(default=10, ge=0, le=100)
+    database_pool_timeout: float = Field(default=10, gt=0, le=60)
+    database_pool_recycle: int = Field(default=1800, ge=60)
+    readiness_timeout_seconds: float = Field(default=3, gt=0, le=10)
+    max_request_bytes: int = Field(default=6_000_000, ge=1024, le=30_000_000)
 
     # --- Security ---------------------------------------------------------
     # Shared secret used by the browser gateway or BFF. When set, a matching
     # Bearer token is accepted as an internal service principal.
-    service_token: str | None = None
+    service_token: str | None = Field(default=None, repr=False)
     # When false (the default) anonymous access is allowed, which keeps local
     # development friction-free. Enable it before exposing the service.
     ai_auth_required: bool = False
     # Must match the business service so access tokens minted there validate here.
-    jwt_secret: str = DEVELOPMENT_JWT_PLACEHOLDER
+    jwt_secret: str = Field(default=DEVELOPMENT_JWT_PLACEHOLDER, repr=False)
     jwt_issuer: str = "vue-h5-template"
     jwt_audience: str = "vue-h5-template-api"
 
     # --- Provider ---------------------------------------------------------
     ai_provider: AIProviderName = "mock"
     ai_base_url: str = "https://api.openai.com/v1"
-    ai_api_key: str | None = None
+    ai_api_key: str | None = Field(default=None, repr=False)
     ai_model: str = "gpt-4o-mini"
     ai_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
     # Hard ceiling on a single conversation turn, in characters.
@@ -75,6 +82,8 @@ class Settings(BaseSettings):
     ai_max_input_chars: int = Field(default=100_000, ge=1_000, le=1_000_000)
     ai_context_token_budget: int = Field(default=8_000, ge=512, le=1_000_000)
     ai_summary_token_budget: int = Field(default=1_000, ge=128, le=32_000)
+    ai_stream_timeout_seconds: float = Field(default=90, gt=0, le=300)
+    sse_heartbeat_seconds: float = Field(default=15, gt=0, le=60)
     ai_provider_max_retries: int = Field(default=3, ge=0, le=8)
     ai_retry_base_seconds: float = Field(default=0.25, ge=0, le=10)
 
@@ -89,7 +98,7 @@ class Settings(BaseSettings):
     # --- Agent and tools --------------------------------------------------
     agent_max_iterations: int = Field(default=5, ge=1, le=20)
     business_service_url: str = "http://localhost:8002"
-    business_service_token: str | None = None
+    business_service_token: str | None = Field(default=None, repr=False)
     business_service_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
 
     # --- Knowledge base ---------------------------------------------------
@@ -103,7 +112,8 @@ class Settings(BaseSettings):
     ai_concurrent_stream_limit: int = Field(default=3, ge=1, le=100)
     ai_daily_token_limit: int = Field(default=200_000, ge=1_000, le=100_000_000)
     # Empty means "use the in-process limiter"; suitable for single instances.
-    redis_url: str | None = None
+    redis_url: str | None = Field(default=None, repr=False)
+    redis_max_connections: int = Field(default=50, ge=1, le=500)
 
     # --- Observability ----------------------------------------------------
     metrics_enabled: bool = True
@@ -123,7 +133,7 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         """Whether the service runs with production semantics."""
-        return self.app_env == "production"
+        return self.app_env in {"staging", "production"}
 
     @model_validator(mode="after")
     def validate_production(self) -> Self:
@@ -131,6 +141,16 @@ class Settings(BaseSettings):
         if not self.is_production:
             return self
 
+        if not self.ai_auth_required:
+            raise ValueError("AI_AUTH_REQUIRED must be true in production")
+        if not self.redis_url:
+            raise ValueError("REDIS_URL is required in production")
+        if "*" in self.trusted_host_list or not self.trusted_host_list:
+            raise ValueError("TRUSTED_HOSTS must contain explicit hosts in production")
+        if len(self.jwt_secret.encode()) < 32:
+            raise ValueError("JWT_SECRET must be at least 32 bytes in production")
+        if self.service_token and len(self.service_token.encode()) < 32:
+            raise ValueError("SERVICE_TOKEN must be at least 32 bytes in production")
         if self.debug:
             raise ValueError("DEBUG must be false in production")
         if self.docs_enabled:
@@ -155,6 +175,21 @@ class Settings(BaseSettings):
     def validate_context_and_chunks(self) -> Self:
         if self.knowledge_chunk_overlap_chars >= self.knowledge_chunk_chars:
             raise ValueError("KNOWLEDGE_CHUNK_OVERLAP_CHARS must be smaller than KNOWLEDGE_CHUNK_CHARS")
+        if self.sse_heartbeat_seconds >= self.ai_stream_timeout_seconds:
+            raise ValueError("SSE_HEARTBEAT_SECONDS must be smaller than AI_STREAM_TIMEOUT_SECONDS")
+        provider_url = urlparse(self.ai_base_url)
+        if provider_url.scheme not in {"http", "https"} or not provider_url.hostname:
+            raise ValueError("AI_BASE_URL must be an absolute HTTP(S) URL")
+        if provider_url.username or provider_url.password or provider_url.query or provider_url.fragment:
+            raise ValueError("AI_BASE_URL must not contain credentials, query, or fragment")
+        if self.is_production and self.ai_provider != "mock" and provider_url.scheme != "https":
+            raise ValueError("AI_BASE_URL must use HTTPS in production")
+        if self.redis_url:
+            redis = urlparse(self.redis_url)
+            if redis.scheme not in {"redis", "rediss"} or not redis.hostname:
+                raise ValueError("REDIS_URL must be an absolute redis/rediss URL")
+        if not self.database_url.startswith(("sqlite+aiosqlite://", "postgresql+asyncpg://")):
+            raise ValueError("DATABASE_URL must use an asynchronous SQLite or PostgreSQL driver")
         business_url = urlparse(self.business_service_url)
         if business_url.scheme not in {"http", "https"} or not business_url.hostname:
             raise ValueError("BUSINESS_SERVICE_URL must be an absolute HTTP(S) URL")
@@ -186,4 +221,4 @@ def get_settings() -> Settings:
 
 def constant_time_compare(left: str, right: str) -> bool:
     """Compare two secret strings without leaking their length or content."""
-    return secrets.compare_digest(left, right)
+    return secrets.compare_digest(left.encode(), right.encode())

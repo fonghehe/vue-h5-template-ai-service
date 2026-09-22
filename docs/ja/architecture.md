@@ -34,3 +34,7 @@ Redis -> リクエスト数、同時ストリーム、会話ロック
 `create_app()` は TrustedHost、CORS、リクエスト ID、ルート、例外処理を登録します。lifespan は Provider、Embedding、DB、リミッター、ロック、ツール、ワークフローを生成します。旧 `/api/ai/chat` はクライアントの `messages[]` を受け取り保存しません。新しい会話ルートは JWT の所有者を検証し、ユーザーメッセージを保存し、制限付きコンテキストを構築して直接ストリームまたは Agent に送ります。正常終了後にアシスタントメッセージと使用量を保存します。切断後にユーザーメッセージだけ残る場合があります。
 
 JSON エラーは `{code,message,data,error,requestId}`、SSE 開始後のエラーは `error` フレームです。PostgreSQL は会話・文書・ベクトル・使用量を保存し、SQLite はローカル/テスト用です。Redis 未設定ならカウンター・ロックはプロセス内だけです。Go サービスはこのリポジトリに含まれず、商品ツールは設定済みベース URL の `/api/v1/products` だけを呼びます。実際の Go 側契約は別途検証が必要です。[会話](/ja/conversations)、[Agent/RAG](/ja/agent-rag)、[拡張](/ja/extending)も参照してください。
+
+## Transaction とリソース所有権
+
+HTTP -> pure ASGI context/size middleware -> Router/Dependency -> ChatService または ConversationService -> Repository/Provider。`AsyncExitStack` が各リソース生成直後に終了処理を登録し、起動途中の失敗にも対応します。Repository は flush のみ、Service が transaction を管理します。短い Session を使い、要約と最終モデル生成の前に接続を返します。tool 履歴・回答・使用量を一括 commit してから finish を送ります。中断時は user message だけ残る場合があります。Redis は共有の制限付き pool、token ごとの期限付き stream lease と会話 lock を使います。ASGI 計測は SSE 全体、ContextVar ログはリクエストごとに独立します。

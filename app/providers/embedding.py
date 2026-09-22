@@ -10,6 +10,7 @@ from collections.abc import Sequence
 import httpx
 
 from app.core.errors import ProviderError
+from app.core.logging import correlation_headers
 
 
 class EmbeddingProvider(ABC):
@@ -42,20 +43,28 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._model = model
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, 5), pool=5))
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         try:
             response = await self._client.post(
                 f"{self._base_url}/embeddings",
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers={"Authorization": f"Bearer {self._api_key}", **correlation_headers()},
                 json={"model": self._model, "input": list(texts)},
             )
             if response.status_code >= 400:
                 raise ProviderError(f"Embedding provider returned HTTP {response.status_code}")
             payload = response.json()
             ordered = sorted(payload["data"], key=lambda item: int(item["index"]))
-            return [[float(value) for value in item["embedding"]] for item in ordered]
+            if len(ordered) != len(texts) or [int(item["index"]) for item in ordered] != list(range(len(texts))):
+                raise ProviderError("Malformed embedding response")
+            vectors = [[float(value) for value in item["embedding"]] for item in ordered]
+            if not vectors or any(
+                not vector or len(vector) != len(vectors[0]) or any(not math.isfinite(value) for value in vector)
+                for vector in vectors
+            ):
+                raise ProviderError("Malformed embedding response")
+            return vectors
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             raise ProviderError("Embedding provider unavailable") from exc
 

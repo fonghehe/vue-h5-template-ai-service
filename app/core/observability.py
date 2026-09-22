@@ -28,3 +28,10 @@ def span(name: str, **attributes: object) -> Iterator[None]:
     tracer = trace.get_tracer("vue-h5-template-ai-service")
     with tracer.start_as_current_span(name, attributes={key: str(value) for key, value in attributes.items()}):
         yield
+
+
+HTTP_REQUESTS = Counter("http_requests_total", "Completed HTTP requests", ["method", "route", "status"])
+HTTP_DURATION = Histogram("http_request_duration_seconds", "Full HTTP/SSE duration", ["method", "route"])
+HTTP_ACTIVE = Gauge("http_active_requests", "Active HTTP requests including SSE")
+
+AI_TTFT = Histogram("ai_time_to_first_token_seconds", "Time to first displayed model delta", ["path"])

@@ -16,7 +16,8 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     op.create_table(
         "conversations",
         sa.Column("id", sa.String(36), primary_key=True),
@@ -76,7 +77,7 @@ def upgrade() -> None:
         sa.Column("document_id", sa.String(36), sa.ForeignKey("documents.id", ondelete="CASCADE"), nullable=False),
         sa.Column("chunk_index", sa.Integer(), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("embedding", Vector(), nullable=False),
+        sa.Column("embedding", Vector().with_variant(sa.JSON(), "sqlite"), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_index"),
     )

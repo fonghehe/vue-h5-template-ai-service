@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, Field
 
+from app.core.logging import correlation_headers
 from app.core.observability import span
 from app.tools.base import Tool, ToolContext
 
@@ -55,25 +56,27 @@ class ProductSearchTool(Tool):
     def __init__(self, *, base_url: str, service_token: str | None, timeout: float) -> None:
         self._base_url = base_url.rstrip("/")
         self._service_token = service_token
-        self._timeout = timeout
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, 5), pool=5))
 
     async def execute(self, arguments: BaseModel, context: ToolContext) -> Any:
         values = ProductSearchInput.model_validate(arguments.model_dump(by_alias=True))
-        headers = {"X-User-ID": context.user_id}
+        headers = {"X-User-ID": context.user_id, **correlation_headers()}
         token = self._service_token or context.service_token
         if token:
             headers["Authorization"] = f"Bearer {token}"
         with span("business_service.search_product", user_id=context.user_id):
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.get(
-                    f"{self._base_url}/api/v1/products",
-                    params={"q": values.query, "maxPrice": values.max_price, "limit": values.limit},
-                    headers=headers,
-                )
+            response = await self._client.get(
+                f"{self._base_url}/api/v1/products",
+                params={"q": values.query, "maxPrice": values.max_price, "limit": values.limit},
+                headers=headers,
+            )
         response.raise_for_status()
         payload = response.json()
         # Return only data needed by the model, not business-service headers.
         return payload.get("data", payload) if isinstance(payload, dict) else payload
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 def _safe_calculate(expression: str) -> float:

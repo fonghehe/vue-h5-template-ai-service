@@ -94,6 +94,10 @@ class ErrorChunk(BaseModel):
 
     type: Literal["error"] = "error"
     message: str
+    code: int | None = None
+    request_id: str | None = Field(default=None, alias="requestId")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ToolStartChunk(BaseModel):

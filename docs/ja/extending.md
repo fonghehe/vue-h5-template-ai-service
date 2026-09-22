@@ -31,3 +31,22 @@ cd docs && npm run docs:typecheck && npm run docs:build
 ```
 
 CI は Mock/模擬 HTTP を利用し、実 API Key を不要にします。`ChatRequest`、SSE、Provider 契約を変える場合はテストと 3 言語の [SSE 文書](/ja/sse) を更新し、`POST /api/ai/chat` との互換性を保ちます。
+
+Repository は flush のみ。Service で `async with database.sessions.begin()` を使い、複数 Repository の書き込みを一括管理します。lifespan に即座に終了処理を登録します。SSE は `QuotaStreamingResponse` で lease・期限・heartbeat・cleanup を管理します。Service は FastAPI Request/Response を受け取りません。domain router の prefix に `/api` を含めず、集約側で旧 prefix と `/api/v1` を登録します。
+
+`stream` は `AsyncGenerator[str, None]` を返します。`aclose()` と上流 HTTP ストリームへのキャンセル伝播を実装し、逐次出力してください。共有クライアントの終了処理は lifespan に登録します。
+
+## 追加機能の回帰テスト
+
+`tests/test_suggestions.py` は二つのパス、三言語、既定値、不正入力、Request ID、返却リストの独立性を検証します。実モデルのキーは不要です。PostgreSQL/Redis の統合確認は `tests/test_infrastructure.py` で別途設定し、ローカルの単体テストではスキップされる場合があります。
+
+```bash
+uv run pytest tests/test_suggestions.py -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+```
+
+文言は `app/services/suggestions.py`、HTTP 検証と包装は `app/api/v1/suggestions.py` にあります。言語追加時は Literal、フロントエンドの OpenAPI enum、テストをそろえ、各言語の文言を個別に調整してください。共有 tuple を変更できないよう、新しい list を返します。ユーザー履歴からの個別推薦は行いません。
+
+[API](./api.md)

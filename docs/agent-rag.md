@@ -2,7 +2,7 @@
 
 ## Agent route
 
-`mode="chat"` uses a direct provider stream. `mode="agent"` runs LangGraph; `auto` runs it for the route's product/calculation/time keyword heuristic. `app/services/agent.py` builds `START -> classify -> agent -> (tool -> agent)* -> END`. The current `classify` node only labels the path; it is not model classification. `AGENT_MAX_ITERATIONS` bounds turns. Graph updates produce tool events, but the final answer is sliced into `delta` frames **after** the graph returns, not streamed token by token.
+`mode="chat"` uses a direct provider stream. `mode="agent"` runs bounded LangGraph tool planning; auto mode uses a product/calculation/time keyword heuristic in `app/services/conversations.py`. The graph chooses registered tools and executes them, then the provider streams the final answer. Planner calls are capped at 256 output tokens; they are not displayed. The final answer is never sliced from a completed model result. `AGENT_MAX_ITERATIONS`, the whole-stream deadline and output cap bound work.
 
 ## Tool boundary
 
@@ -17,3 +17,5 @@ With `useRag=true`, a turn embeds the query, retrieves owner-scoped chunks, adds
 ## Structured output and evaluation
 
 `LLMProvider.structured_output()` validates against a Pydantic model; the HTTP adapter retries invalid JSON once. `ProductRecommendation` in `app/schemas/knowledge.py` is an example schema, not a public API response. `evals/run.py` is a small offline smoke script: one calculator case and non-empty mock completions, **not** a quantitative RAG benchmark. Pytest adds targeted retrieval/tool/schema checks. Green smoke results do not establish live model quality.
+
+Upload metadata must be a JSON object. Parsing runs in a bounded worker thread, PDF signatures are validated, filenames are reduced to basenames, extracted text/chunk counts are capped, and embedding requests use batches of 64. Document and chunks commit together; SQLite enables foreign-key cascades. Untrusted PDFs with stringent isolation requirements need a separate resource-limited parsing worker.

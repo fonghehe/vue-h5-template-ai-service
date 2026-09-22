@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
-from types import TracebackType
+from contextvars import ContextVar
+
+from opentelemetry import trace
 
 _RESERVED = {
     "args",
@@ -72,14 +74,20 @@ class TextFormatter(logging.Formatter):
         return f"{base} {extra}".rstrip()
 
 
-def configure_logging(level: str, fmt: str) -> None:
+def configure_logging(
+    level: str, fmt: str, *, service: str = "vue-h5-template-ai-service", environment: str = "development"
+) -> None:
     """Install the root handler used by the whole process."""
     handler = logging.StreamHandler(sys.stdout)
+    handler.addFilter(ContextFilter(service, environment))
     handler.setFormatter(JsonFormatter() if fmt == "json" else TextFormatter())
 
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level)
+
+    for name in ("httpx", "httpx2", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
     # Uvicorn installs its own handlers; route them through ours so access
     # lines and application lines share one format.
@@ -89,37 +97,35 @@ def configure_logging(level: str, fmt: str) -> None:
         logger.propagate = True
 
 
+_context: ContextVar[dict[str, object] | None] = ContextVar("log_context", default=None)
+
+
+class ContextFilter(logging.Filter):
+    def __init__(self, service: str, environment: str) -> None:
+        super().__init__()
+        self.service, self.environment = service, environment
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        fields = {"service": self.service, "environment": self.environment, **(_context.get() or {})}
+        current = trace.get_current_span().get_span_context()
+        if current.is_valid:
+            fields["traceId"] = format(current.trace_id, "032x")
+        for key, value in fields.items():
+            if not hasattr(record, key):
+                setattr(record, key, value)
+        return True
+
+
 @contextmanager
 def request_scope(**fields: object) -> Iterator[None]:
-    """Attach contextual fields to every log line emitted inside the block.
-
-    Uses a LoggerAdapter-free approach so that third-party loggers also pick
-    the fields up without needing to be wrapped.
-    """
-    if not fields:
-        yield
-        return
-
-    previous = logging.Logger.makeRecord
-
-    def makeRecord(
-        self: logging.Logger,
-        name: str,
-        level: int,
-        fn: str,
-        lno: int,
-        msg: object,
-        args: tuple[object, ...] | Mapping[str, object],
-        exc_info: tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None] | None,
-        func: str | None = None,
-        extra: Mapping[str, object] | None = None,
-        sinfo: str | None = None,
-    ) -> logging.LogRecord:
-        merged = {**(extra or {}), **fields}
-        return previous(self, name, level, fn, lno, msg, args, exc_info, func, merged, sinfo)
-
-    logging.Logger.makeRecord = makeRecord  # type: ignore[method-assign]
+    """Task-local context, inherited by provider tasks without global patches."""
+    token = _context.set({**(_context.get() or {}), **fields})
     try:
         yield
     finally:
-        logging.Logger.makeRecord = previous  # type: ignore[method-assign]
+        _context.reset(token)
+
+
+def correlation_headers() -> dict[str, str]:
+    request_id = (_context.get() or {}).get("requestId")
+    return {"X-Request-ID": str(request_id)} if request_id else {}

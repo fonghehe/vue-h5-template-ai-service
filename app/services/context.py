@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from app.core.errors import ValidationError
 from app.db.models import Conversation, Message
 from app.providers.base import LLMProvider
 from app.schemas.chat import ChatMessage
@@ -48,19 +49,21 @@ class ContextBuilder:
             system_parts.append("Tool results:\n" + "\n".join(tool_results))
 
         system = self._system_message(system_parts)
-        remaining = self._token_budget - estimate_tokens(system.content)
+        remaining = self._token_budget - estimate_tokens(system.content) - 4
         selected: list[ChatMessage] = []
         for message in reversed(messages):
             content = message.content
             role = message.role
             # Persisted tool results remain useful context, but a later turn no
             # longer has the matching assistant tool-call frame required by
-            # OpenAI-compatible protocols. Reframe them as trusted history.
+            # OpenAI-compatible protocols. Reframe them as data without elevating their instruction priority.
             if role == "tool":
-                role = "system"
-                content = f"Previous registered tool result: {content}"
+                role = "assistant"
+                content = f"Previous tool output (untrusted data): {content}"
             cost = estimate_tokens(content) + 4
             if cost > remaining:
+                if not selected:
+                    raise ValidationError("Newest message exceeds the context token budget")
                 break
             selected.append(ChatMessage.model_validate({"role": role, "content": content}))
             remaining -= cost
@@ -79,16 +82,21 @@ class ContextBuilder:
                 if tool_results:
                     system_parts.append("Tool results:\n" + "\n".join(tool_results))
                 system = self._system_message(system_parts)
-                while selected and self.count_tokens([system, *selected]) > self._token_budget:
+                while len(selected) > 1 and self.count_tokens([system, *selected]) > self._token_budget:
                     selected.pop(0)
+                if selected and self.count_tokens([system, *selected]) > self._token_budget:
+                    # Preserve the newest user turn; reduce context rather than drop it.
+                    spare = self._token_budget - self.count_tokens(selected) - 4
+                    system = ChatMessage(role="system", content=system.content[: max(1, spare * 3 - 2)])
         return [system, *selected]
 
     async def _summarize(self, conversation: Conversation, messages: Sequence[Message]) -> None:
-        history = "\n".join(f"{message.role}: {message.content}" for message in messages)
+        # Summarization input is bounded independently of stored history size.
+        history = "\n".join(f"{message.role}: {message.content}" for message in messages)[-16_000:]
         transcript = f"Previous summary:\n{conversation.summary}\n\n{history}" if conversation.summary else history
         prompt = self._prompts.get("conversation.summary").content
         result = await self._provider.complete(
-            [ChatMessage(role="system", content=prompt), ChatMessage(role="user", content=transcript)],
+            [ChatMessage(role="system", content=prompt), ChatMessage(role="user", content=transcript[-20_000:])],
             self._router.for_task("summarization"),
         )
         # Enforce the budget locally even if a provider ignores maxTokens.

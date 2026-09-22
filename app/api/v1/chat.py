@@ -1,41 +1,19 @@
-"""Chat streaming route.
-
-The route is a thin translation layer: validate input, enforce quota, then
-convert provider fragments into Server-Sent Events frames. All model-specific
-logic lives in :mod:`app.providers`.
-"""
+"""The legacy and versioned stateless SSE transport."""
 
 from __future__ import annotations
 
-import logging
-from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.errors import AppError, RateLimitError, ValidationError
-from app.core.security import (
-    ChatProviderDep,
-    CurrentPrincipal,
-    RateLimiterDep,
-    SettingsDep,
-)
-from app.providers.base import ChatProvider
-from app.schemas.chat import (
-    ChatRequest,
-    DeltaChunk,
-    ErrorChunk,
-    FinishChunk,
-    StartChunk,
-    encode_sse,
-)
-from app.services.streaming import cancel_aware_stream
+from app.api.streaming import QuotaStreamingResponse
+from app.core.errors import RateLimitError
+from app.core.security import ChatProviderDep, CurrentPrincipal, RateLimiterDep, SettingsDep
+from app.schemas.chat import ChatRequest
+from app.services.chat import ChatService
 
-router = APIRouter(prefix="/api/ai", tags=["ai"])
-logger = logging.getLogger(__name__)
-
-RATE_LIMIT_WINDOW_SECONDS = 60
+router = APIRouter(prefix="/ai", tags=["ai"])
 
 
 @router.post("/chat", summary="Stream a chat completion as Server-Sent Events")
@@ -47,100 +25,24 @@ async def chat(
     rate_limiter: RateLimiterDep,
     principal: CurrentPrincipal,
 ) -> StreamingResponse:
-    """Stream an assistant reply for the supplied conversation.
-
-    Emits `start`, zero or more `delta`, and finally `finish`. A failure after
-    the stream has begun is reported as an `error` event, because the HTTP
-    status has already been sent.
-    """
-    if sum(len(message.content) for message in payload.messages) > settings.ai_max_input_chars:
-        raise ValidationError("Total message content is too large")
-    identity = _rate_limit_identity(principal.subject, principal.kind, request)
-    count = await rate_limiter.hit(f"ai:{principal.kind}:{identity}", RATE_LIMIT_WINDOW_SECONDS)
-    if count > settings.ai_rate_limit_per_minute:
-        logger.warning("rate limit exceeded", extra={"subject": identity, "kind": principal.kind})
-        raise RateLimitError()
-
-    conversation_id = payload.conversation_id or f"conversation-{uuid4().hex}"
-    if not await request.app.state.stream_quota.acquire(identity, settings.ai_concurrent_stream_limit):
+    subject = principal.subject
+    if principal.kind == "anonymous":
+        subject = request.client.host if request.client is not None else "unknown"
+    identity = f"{principal.kind}:{subject}"
+    service = ChatService(provider, settings, rate_limiter)
+    await service.admit(payload, identity)
+    quota = request.app.state.stream_quota
+    token = await quota.acquire(identity, settings.ai_concurrent_stream_limit)
+    if token is None:
         raise RateLimitError("Too many concurrent streams")
-    logger.info(
-        "chat stream started",
-        extra={
-            "conversationId": conversation_id,
-            "subject": principal.subject,
-            "kind": principal.kind,
-            "messages": len(payload.messages),
-            "provider": provider.name,
-        },
+    conversation_id = payload.conversation_id or f"conversation-{uuid4().hex}"
+    return QuotaStreamingResponse(
+        service.stream(payload, conversation_id, request.state.request_id),
+        quota=quota,
+        identity=identity,
+        token=token,
+        timeout=settings.ai_stream_timeout_seconds,
+        heartbeat=settings.sse_heartbeat_seconds,
+        request_id=request.state.request_id,
+        disconnected=request.is_disconnected,
     )
-
-    return StreamingResponse(
-        _event_stream(request, provider, payload, conversation_id, identity),
-        media_type="text/event-stream",
-        headers={
-            # `no-transform` stops intermediaries from buffering or recompressing.
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            # Disables proxy buffering in nginx and friends.
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-
-async def _event_stream(
-    request: Request,
-    provider: ChatProvider,
-    payload: ChatRequest,
-    conversation_id: str,
-    quota_identity: str,
-) -> AsyncIterator[str]:
-    """Yield SSE frames until the provider finishes or the client disconnects."""
-    yield encode_sse(StartChunk(id=conversation_id))
-
-    emitted = 0
-    try:
-        async for delta in cancel_aware_stream(request, provider, payload.messages):
-            emitted += len(delta)
-            if not delta:
-                continue
-            yield encode_sse(DeltaChunk(delta=delta))
-
-    except Exception as exc:
-        logger.exception("chat stream failed", extra={"conversationId": conversation_id})
-        # The generic message keeps provider internals out of the browser.
-        yield encode_sse(ErrorChunk(message=_safe_error_message(exc)))
-        return
-    finally:
-        await request.app.state.stream_quota.release(quota_identity)
-
-    logger.info(
-        "chat stream finished",
-        extra={"conversationId": conversation_id, "characters": emitted},
-    )
-    yield encode_sse(FinishChunk(reason="stop"))
-
-
-def _safe_error_message(exc: Exception) -> str:
-    """Return a client-safe message for a stream failure.
-
-    Application errors carry messages written for end users; anything else is
-    replaced by a generic sentence so stack details cannot leak.
-    """
-    if isinstance(exc, AppError):
-        return exc.message
-    return "AI stream failed"
-
-
-def _rate_limit_identity(subject: str, kind: str, request: Request) -> str:
-    """Build the quota key for a request.
-
-    Anonymous callers are keyed by client IP; authenticated callers by subject,
-    so that sharing a NAT does not let one user exhaust another's quota while
-    still preventing a single IP from flooding us anonymously.
-    """
-    if kind != "anonymous":
-        return subject
-    if request.client is not None:
-        return request.client.host
-    return "unknown"

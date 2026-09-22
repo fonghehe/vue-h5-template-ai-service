@@ -7,7 +7,9 @@ from app.core.config import DEVELOPMENT_JWT_PLACEHOLDER, Settings, get_settings
 
 PRODUCTION_BASE = {
     "APP_ENV": "production",
-    "SERVICE_TOKEN": "a-real-service-token",
+    "SERVICE_TOKEN": "a-real-service-token-for-production-0001",
+    "AI_AUTH_REQUIRED": "true",
+    "REDIS_URL": "redis://localhost:6379/0",
     "JWT_SECRET": "s" * 40,
     "DOCS_ENABLED": "false",
     "LOG_FORMAT": "json",

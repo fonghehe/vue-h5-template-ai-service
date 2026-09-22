@@ -8,11 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import anyio
 from pypdf import PdfReader
 
+from app.core.errors import ValidationError
 from app.db.models import Document, DocumentChunk
 from app.db.repositories import KnowledgeRepository
 from app.providers.embedding import EmbeddingProvider
+
+_PARSE_LIMITER = anyio.CapacityLimiter(2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +43,25 @@ class KnowledgeService:
     async def ingest(
         self, *, user_id: str, filename: str, content_type: str | None, data: bytes, metadata: dict[str, Any]
     ) -> Document:
-        content = _parse_document(filename, content_type, data)
+        if not isinstance(metadata, dict):
+            raise ValidationError("Metadata must be a JSON object")
+        filename = Path(filename.replace("\\", "/")).name
+        if len(filename) > 240:
+            raise ValidationError("Filename is too long")
+        try:
+            content = await anyio.to_thread.run_sync(
+                _parse_document, filename, content_type, data, limiter=_PARSE_LIMITER
+            )
+        except Exception as exc:
+            raise ValidationError("Document cannot be parsed; upload UTF-8 text or a valid PDF") from exc
+        if len(content) > 1_000_000:
+            raise ValidationError("Extracted document text is too large")
         pieces = _chunk(content, self._chunk_chars, self._overlap_chars)
-        vectors = await self._embeddings.embed(pieces)
+        if len(pieces) > 2_000:
+            raise ValidationError("Document produces too many chunks")
+        vectors: list[list[float]] = []
+        for offset in range(0, len(pieces), 64):
+            vectors.extend(await self._embeddings.embed(pieces[offset : offset + 64]))
         document = Document(
             user_id=user_id, title=Path(filename).stem, source=filename, metadata_json=metadata, content=content
         )
@@ -49,7 +69,8 @@ class KnowledgeService:
             DocumentChunk(chunk_index=index, content=piece, embedding=vector)
             for index, (piece, vector) in enumerate(zip(pieces, vectors, strict=True))
         ]
-        return await self._repository.create(document, chunks)
+        async with self._repository.session.begin():
+            return await self._repository.create(document, chunks)
 
     async def search(self, user_id: str, query: str, top_k: int) -> list[RetrievedChunk]:
         query_vector = (await self._embeddings.embed([query]))[0]
@@ -79,9 +100,23 @@ def _parse_document(filename: str, content_type: str | None, data: bytes) -> str
     suffix = Path(filename).suffix.lower()
     if suffix in {".txt", ".md"}:
         return data.decode("utf-8")
-    if suffix == ".pdf" or content_type == "application/pdf":
+    if (
+        suffix == ".pdf"
+        and data.startswith(b"%PDF-")
+        and content_type in {"application/pdf", "application/octet-stream", None}
+    ):
         reader = PdfReader(io.BytesIO(data))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+        if len(reader.pages) > 200:
+            raise ValueError("PDF has too many pages")
+        parts: list[str] = []
+        extracted = 0
+        for page in reader.pages:
+            text = page.extract_text() or ""
+            extracted += len(text)
+            if extracted > 1_000_000:
+                raise ValueError("PDF text is too large")
+            parts.append(text)
+        return "\n".join(parts)
     raise ValueError("Only .txt, .md and .pdf documents are supported")
 
 

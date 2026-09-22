@@ -93,7 +93,7 @@ def authenticate(
         raise AuthenticationError("Invalid or expired token") from exc
 
     subject = payload.get("sub")
-    if not isinstance(subject, str) or not subject:
+    if not isinstance(subject, str) or not subject or len(subject) > 120:
         raise AuthenticationError("Invalid token subject")
 
     return Principal(

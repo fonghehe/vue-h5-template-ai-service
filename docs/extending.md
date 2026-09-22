@@ -33,3 +33,22 @@ cd docs && npm run docs:typecheck && npm run docs:build
 ```
 
 Use mock providers/mocked HTTP, not real API keys, in CI. Changes to `ChatRequest`, SSE frames or provider contracts require tests and updates to all three language versions of [SSE](/sse). Preserve `POST /api/ai/chat` and its existing event shape.
+
+Repositories only flush. Put `async with database.sessions.begin()` around service writes and multi-repository work; never commit inside a repository. Register resource closure immediately in lifespan. Use `QuotaStreamingResponse` for SSE admission leases, deadlines, heartbeat comments and cleanup. Keep service signatures free of FastAPI Request/Response. Add domain routers without `/api` in their own prefix; aggregation supplies both `/api` and `/api/v1`.
+
+`stream` returns `AsyncGenerator[str, None]`: implementations must support `aclose()`, forward cancellation to the upstream HTTP stream, and yield incrementally. Register pooled client cleanup in lifespan.
+
+## Feature regression checks
+
+`tests/test_suggestions.py` checks both route prefixes, all three languages, the default, validation failure, response request IDs and independent returned lists. These tests use the application fixture without real model keys. Real PostgreSQL/Redis integration is separately configured in `tests/test_infrastructure.py`; a local unit run may skip those checks.
+
+```bash
+uv run pytest tests/test_suggestions.py -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+```
+
+Curated text lives in `app/services/suggestions.py`; HTTP validation and response wrapping live in `app/api/v1/suggestions.py`. Edit each language deliberately and keep the Literal contract, frontend OpenAPI enum and tests synchronized when adding a locale. The service returns a new list so a caller cannot mutate the shared prompt tuple. It does not personalize prompts from user history.
+
+[API](./api.md)

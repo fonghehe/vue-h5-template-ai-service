@@ -8,7 +8,6 @@ from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.core.errors import CODE_FORBIDDEN, CODE_NOT_FOUND, AppError
 from app.db.models import Conversation, Document, DocumentChunk, Message, UsageRecord
@@ -21,33 +20,49 @@ class ConversationRepository:
     async def create(self, *, user_id: str, title: str, model: str) -> Conversation:
         conversation = Conversation(user_id=user_id, title=title, model=model)
         self.session.add(conversation)
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(conversation)
         return conversation
 
-    async def list(self, user_id: str) -> builtins.list[Conversation]:
+    async def list(self, user_id: str, *, limit: int = 50, offset: int = 0) -> builtins.list[Conversation]:
         rows = await self.session.scalars(
-            select(Conversation).where(Conversation.user_id == user_id).order_by(Conversation.updated_at.desc())
+            select(Conversation)
+            .where(Conversation.user_id == user_id)
+            .order_by(Conversation.updated_at.desc(), Conversation.id)
+            .limit(limit)
+            .offset(offset)
         )
         return builtins.list(rows)
 
-    async def get_owned(self, conversation_id: str, user_id: str, *, messages: bool = False) -> Conversation:
+    async def get_owned(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        messages: bool = False,
+        history_limit: int = 200,
+        before: int | None = None,
+    ) -> Conversation:
         statement = select(Conversation).where(Conversation.id == conversation_id)
-        if messages:
-            statement = statement.options(selectinload(Conversation.messages)).execution_options(populate_existing=True)
         conversation = await self.session.scalar(statement)
         if conversation is None:
             raise AppError("Conversation not found", code=CODE_NOT_FOUND, status_code=404)
         if conversation.user_id != user_id:
             raise AppError("Conversation access denied", code=CODE_FORBIDDEN, status_code=403)
         if messages:
-            conversation.messages.sort(key=lambda message: message.sequence)
+            history = select(Message).where(Message.conversation_id == conversation_id)
+            if before is not None:
+                history = history.where(Message.sequence < before)
+            rows = list(await self.session.scalars(history.order_by(Message.sequence.desc()).limit(history_limit)))
+            from sqlalchemy.orm.attributes import set_committed_value
+
+            set_committed_value(conversation, "messages", list(reversed(rows)))
         return conversation
 
     async def delete_owned(self, conversation_id: str, user_id: str) -> None:
         conversation = await self.get_owned(conversation_id, user_id)
         await self.session.delete(conversation)
-        await self.session.commit()
+        await self.session.flush()
 
     async def add_message(
         self,
@@ -83,7 +98,7 @@ class ConversationRepository:
         )
         conversation.updated_at = datetime.now(UTC)
         self.session.add(message)
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(message)
         return message
 
@@ -94,7 +109,7 @@ class UsageRepository:
 
     async def add(self, record: UsageRecord) -> None:
         self.session.add(record)
-        await self.session.commit()
+        await self.session.flush()
 
     async def summary(self, user_id: str, usage_date: date | None = None) -> dict[str, Any]:
         statement = select(
@@ -150,13 +165,17 @@ class KnowledgeRepository:
     async def create(self, document: Document, chunks: list[DocumentChunk]) -> Document:
         document.chunks = chunks
         self.session.add(document)
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(document)
         return document
 
-    async def list(self, user_id: str) -> builtins.list[Document]:
+    async def list(self, user_id: str, *, limit: int = 50, offset: int = 0) -> builtins.list[Document]:
         rows = await self.session.scalars(
-            select(Document).where(Document.user_id == user_id).order_by(Document.created_at.desc())
+            select(Document)
+            .where(Document.user_id == user_id)
+            .order_by(Document.created_at.desc(), Document.id)
+            .limit(limit)
+            .offset(offset)
         )
         return builtins.list(rows)
 
@@ -167,7 +186,7 @@ class KnowledgeRepository:
         if document.user_id != user_id:
             raise AppError("Document access denied", code=CODE_FORBIDDEN, status_code=403)
         await self.session.execute(delete(Document).where(Document.id == document_id))
-        await self.session.commit()
+        await self.session.flush()
 
     async def chunks(self, user_id: str) -> builtins.list[tuple[DocumentChunk, Document]]:
         rows = await self.session.execute(

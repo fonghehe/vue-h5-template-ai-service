@@ -14,6 +14,7 @@ from app.providers.base import (
     MockChatProvider,
     OpenAICompatibleProvider,
 )
+from app.providers.embedding import OpenAICompatibleEmbeddingProvider
 from app.providers.factory import create_chat_provider
 from app.schemas.chat import ChatMessage, ChatToolCall
 
@@ -103,6 +104,50 @@ def patch_client(monkeypatch: pytest.MonkeyPatch, transport: httpx.MockTransport
     """
     original = httpx.AsyncClient
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=transport))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        [{"index": 0, "embedding": [1.0]}, {"index": 0, "embedding": [2.0]}],
+        [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": [1.0, 2.0]}],
+        [{"index": 0, "embedding": [float("nan")]}, {"index": 1, "embedding": [2.0]}],
+    ],
+    ids=["missing", "duplicate-index", "mixed-dimensions", "nonfinite"],
+)
+async def test_embedding_rejects_invalid_vectors(monkeypatch: pytest.MonkeyPatch, data: object) -> None:
+    patch_client(
+        monkeypatch,
+        httpx.MockTransport(lambda _: httpx.Response(200, content=json.dumps({"data": data}).encode())),
+    )
+    provider = OpenAICompatibleEmbeddingProvider(
+        base_url="https://example.test/v1", api_key="fake", model="embedding", timeout=1
+    )
+    try:
+        with pytest.raises(ProviderError, match="Malformed embedding response"):
+            await provider.embed(["one", "two"])
+    finally:
+        await provider.aclose()
+
+
+async def test_embedding_preserves_input_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_client(
+        monkeypatch,
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, json={"data": [{"index": 1, "embedding": [2.0]}, {"index": 0, "embedding": [1.0]}]}
+            )
+        ),
+    )
+    provider = OpenAICompatibleEmbeddingProvider(
+        base_url="https://example.test/v1", api_key="fake", model="embedding", timeout=1
+    )
+    try:
+        assert await provider.embed(["one", "two"]) == [[1.0], [2.0]]
+    finally:
+        await provider.aclose()
+    assert provider._client.is_closed
 
 
 async def test_openai_provider_parses_deltas(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -223,8 +268,8 @@ async def test_openai_provider_enforces_output_cap(monkeypatch: pytest.MonkeyPat
         max_output_chars=150,
     )
 
-    output = await collect(provider)
-    assert len(output) <= 250, "the stream must stop instead of running unbounded"
+    with pytest.raises(ProviderError, match="output limit"):
+        await collect(provider)
 
 
 def test_provider_stream_is_an_async_iterator() -> None:

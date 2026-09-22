@@ -3,10 +3,11 @@
 Base URL is the AI service (local `http://localhost:8001`). JSON success and pre-stream errors use `{ "code": 0, "message": "ok", "data": ..., "error": null, "requestId": "..." }`; nonzero `code` represents failure. SSE uses JSON `data:` frames instead of this envelope. `X-Request-ID` is returned in headers. `/docs` and `/openapi.json` exist only when `DOCS_ENABLED=true`.
 
 | Method | Path | Principal | Response |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | GET | `/health` | public | process liveness envelope |
 | GET | `/ready` | public | limiter readiness envelope, 503 if degraded |
 | GET | `/metrics` | public if enabled | Prometheus exposition, otherwise 404 |
+| GET | `/api/ai/suggestions` | — | JSON `string[]` |
 | POST | `/api/ai/chat` | user/service/anonymous when allowed | legacy SSE, no persistence |
 | POST, GET | `/api/conversations` | user JWT | create/list |
 | GET, DELETE | `/api/conversations/{id}` | owner JWT | details/delete |
@@ -44,10 +45,41 @@ Upload supports `.txt`, `.md`, `.pdf`; `metadata` is a JSON object encoded as a 
 ## Error codes and limits
 
 | Code | HTTP | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | 4000 / 4001 | 400 / 422 | bad request / Pydantic validation |
 | 4010 / 4030 / 4040 | 401 / 403 / 404 | authentication / ownership / missing resource |
 | 4090 / 4290 | 409 / 429 | conflict / quota |
 | 5000 / 5030 | 500 / 502 | internal / provider unavailable |
 
-Validation errors expose field names, not submitted values. The legacy route has per-minute and concurrent-stream limits. Persistent turns add a daily recorded-token threshold; see [Configuration](/configuration). `/ready` only checks the limiter, not every dependency.
+`/health` is process liveness and exposes backend names only. `/ready` concurrently checks Redis/limiter and the database with bounded timeouts and returns 503 on errors; it does not call a model or the Go service. Redis coordination errors fail closed with a safe 503 envelope. `/metrics` must be restricted at the proxy/network layer. `OTEL_ENABLED` installs tracing hooks without an exporter.
+
+Collections accept `page` (1–100000) and `page_size` (1–100, default 50), preserving the existing list envelope. Conversation details return the latest 100 messages by default; use `page_size` and `before=<sequence>` for earlier pages. Message responses expose `sequence`. Context loads at most 200 recent messages, bounds summarization input, and preserves the newest user turn or rejects it if too large. Persistent message content is limited to 20000 characters and the configured context budget. Old `/api/*` paths remain; every business route also has an `/api/v1/*` alias.
+
+## Starter prompt API
+
+`GET /api/ai/suggestions` is public and returns three curated strings in the standard JSON envelope. It does not call a model, use model keys, spend model tokens, write conversation history or consume a streaming admission lease. `/api/v1/ai/suggestions` is an equivalent alias. It is not an SSE endpoint.
+
+`locale` is optional and accepts exactly `en-US`, `zh-CN`, or `ja-JP`; the default is `en-US`. Unsupported values, including `zh-TW`, return HTTP 422 with application code 4001. The frontend normalizes its locale before requesting. `Accept-Language` does not select this endpoint’s language.
+
+```bash
+curl -s 'http://localhost:8001/api/ai/suggestions'
+curl -s 'http://localhost:8001/api/v1/ai/suggestions?locale=ja-JP'
+```
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": [
+    "Help me compare products before buying.",
+    "What should I check before placing an order?",
+    "Explain how streaming AI responses work."
+  ],
+  "error": null,
+  "requestId": "example-request-id"
+}
+```
+
+Curated text lives in `app/services/suggestions.py`; HTTP validation and response wrapping live in `app/api/v1/suggestions.py`. Edit each language deliberately and keep the Literal contract, frontend OpenAPI enum and tests synchronized when adding a locale. The service returns a new list so a caller cannot mutate the shared prompt tuple. It does not personalize prompts from user history.
+
+[Tests](./extending.md)

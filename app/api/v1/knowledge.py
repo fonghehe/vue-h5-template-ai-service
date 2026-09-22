@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
@@ -16,7 +16,7 @@ from app.schemas.envelope import ApiResponse
 from app.schemas.knowledge import DocumentView
 from app.services.knowledge import KnowledgeService
 
-router = APIRouter(prefix="/api/knowledge/documents", tags=["knowledge"])
+router = APIRouter(prefix="/knowledge/documents", tags=["knowledge"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 
@@ -34,6 +34,8 @@ async def upload_document(
         raise ValidationError("File is too large")
     try:
         metadata_value: dict[str, Any] = json.loads(metadata)
+        if not isinstance(metadata_value, dict):
+            raise ValidationError("Metadata must be a JSON object")
         service = KnowledgeService(
             KnowledgeRepository(session),
             request.app.state.embedding_provider,
@@ -54,9 +56,13 @@ async def upload_document(
 
 @router.get("", response_model=ApiResponse[list[DocumentView]])
 async def list_documents(
-    request: Request, user: AuthenticatedUser, session: DbSession
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: Annotated[int, Query(ge=1, le=100_000)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> ApiResponse[list[DocumentView]]:
-    documents = await KnowledgeRepository(session).list(user.subject)
+    documents = await KnowledgeRepository(session).list(user.subject, limit=page_size, offset=(page - 1) * page_size)
     return ApiResponse(
         data=[DocumentView.model_validate(item) for item in documents], requestId=request.state.request_id
     )
@@ -66,5 +72,6 @@ async def list_documents(
 async def delete_document(
     document_id: str, request: Request, user: AuthenticatedUser, session: DbSession
 ) -> ApiResponse[None]:
-    await KnowledgeRepository(session).delete_owned(document_id, user.subject)
+    async with session.begin():
+        await KnowledgeRepository(session).delete_owned(document_id, user.subject)
     return ApiResponse(data=None, requestId=request.state.request_id)

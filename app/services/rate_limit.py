@@ -7,6 +7,9 @@ from asyncio import Lock
 from typing import Protocol
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
+
+from app.core.errors import CODE_UNAVAILABLE, AppError
 
 
 class RateLimiter(Protocol):
@@ -70,53 +73,38 @@ class RedisRateLimiter:
 
     name = "redis"
 
-    def __init__(self, redis: Redis) -> None:
+    def __init__(self, redis: Redis, *, owns_client: bool = True) -> None:
         self._redis = redis
+        self._owns_client = owns_client
 
     @classmethod
     def from_url(cls, url: str) -> RedisRateLimiter:
-        return cls(Redis.from_url(url, decode_responses=True))
+        return cls(Redis.from_url(url, decode_responses=True, socket_timeout=3, socket_connect_timeout=3))
 
     async def hit(self, key: str, window_seconds: int) -> int:
-        async with self._redis.pipeline(transaction=True) as pipeline:
-            pipeline.incr(key)
-            # `nx` keeps the original window; refreshing it would let a steady
-            # stream of requests reset the counter indefinitely.
-            pipeline.expire(key, window_seconds, nx=True)
-            result = await pipeline.execute()
-        return int(result[0])
+        try:
+            async with self._redis.pipeline(transaction=True) as pipeline:
+                pipeline.incr(key)
+                # `nx` keeps the original window; refreshing it would let a steady
+                # stream of requests reset the counter indefinitely.
+                pipeline.expire(key, window_seconds, nx=True)
+                result = await pipeline.execute()
+            return int(result[0])
+        except RedisError as exc:
+            raise AppError("Rate limit backend unavailable", code=CODE_UNAVAILABLE, status_code=503) from exc
 
     async def ping(self) -> bool:
         return bool(await self._redis.ping())
 
     async def aclose(self) -> None:
-        await self._redis.aclose()
+        if self._owns_client:
+            await self._redis.aclose()
 
 
-class NoopRateLimiter:
-    """Limiter used when the backend is unreachable.
-
-    Failing open (rather than rejecting every request) keeps a Redis outage
-    from taking down chat entirely; `/ready` still reports the degradation.
-    """
-
-    name = "noop"
-
-    async def hit(self, key: str, window_seconds: int) -> int:
-        return 0
-
-    async def ping(self) -> bool:
-        return False
-
-    async def aclose(self) -> None:
-        return None
-
-
-def build_rate_limiter(redis_url: str | None) -> RateLimiter:
+def build_rate_limiter(redis_url: str | None, *, redis: Redis | None = None) -> RateLimiter:
     """Create the limiter implied by configuration."""
+    if redis is not None:
+        return RedisRateLimiter(redis, owns_client=False)
     if not redis_url:
         return MemoryRateLimiter()
-    try:
-        return RedisRateLimiter.from_url(redis_url)
-    except Exception:  # pragma: no cover - depends on driver internals
-        return NoopRateLimiter()
+    return RedisRateLimiter.from_url(redis_url)

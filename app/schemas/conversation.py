@@ -26,6 +26,7 @@ class MessageView(BaseModel):
 
     id: str
     conversation_id: str = Field(alias="conversationId")
+    sequence: int
     role: str
     content: str
     tool_call_id: str | None = Field(default=None, alias="toolCallId")

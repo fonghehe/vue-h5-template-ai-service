@@ -127,6 +127,23 @@ def test_chat_rejects_malformed_token(client: TestClient) -> None:
     assert response.json()["code"] == 4010
 
 
+def test_chat_rejects_invalid_base64_signature(client: TestClient) -> None:
+    # Invalid alphabet characters must not be silently discarded before verification.
+    token = make_token() + "!!!!"
+    response = client.post("/api/ai/chat", json=chat_body(), headers=auth_header(token))
+    assert response.status_code == 401
+
+
+def test_chat_rejects_deeply_nested_jwt_header(client: TestClient) -> None:
+    import base64
+
+    header = '{"alg":"HS256","nested":' + "[" * 1100 + "0" + "]" * 1100 + "}"
+    encoded = base64.urlsafe_b64encode(header.encode()).rstrip(b"=").decode()
+    _, payload, signature = make_token().split(".")
+    response = client.post("/api/ai/chat", json=chat_body(), headers=auth_header(f"{encoded}.{payload}.{signature}"))
+    assert response.status_code == 401
+
+
 def test_chat_rejects_token_signed_with_another_secret(client: TestClient) -> None:
     token = make_token(secret="a-completely-different-secret-value-01")
 

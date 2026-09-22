@@ -31,3 +31,22 @@ cd docs && npm run docs:typecheck && npm run docs:build
 ```
 
 CI 使用 Mock/模拟 HTTP，不调用真实 API。改 `ChatRequest`、SSE 或 Provider 契约时，更新测试与三语 [SSE 文档](/zh/sse)，保留 `POST /api/ai/chat` 兼容性。
+
+Repository 只 flush；Service 用 `async with database.sessions.begin()` 管理写入和跨 Repository 事务。资源创建后立即登记 lifespan 关闭回调。SSE 使用 `QuotaStreamingResponse` 管理租约、截止时间、心跳与清理。Service 不接收 FastAPI Request/Response。域路由自身 prefix 不带 `/api`，聚合层注册旧路径和 `/api/v1`。
+
+`stream` 返回 `AsyncGenerator[str, None]`：实现必须支持 `aclose()`，将取消传递到上游 HTTP 流并增量输出；复用的客户端须在 lifespan 注册关闭。
+
+## 新增功能回归检查
+
+`tests/test_suggestions.py` 覆盖两组路径、三种语言、默认值、校验失败、Request ID 和返回列表隔离。测试不需要真实模型密钥。真实 PostgreSQL/Redis 检查单独配置于 `tests/test_infrastructure.py`，本地单元测试运行可能跳过这些集成项。
+
+```bash
+uv run pytest tests/test_suggestions.py -q
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+```
+
+建议文案位于 `app/services/suggestions.py`，HTTP 校验与包装位于 `app/api/v1/suggestions.py`。新增语言时需同步 Literal 契约、前端 OpenAPI 枚举和测试，并逐语言维护文案。服务返回新的 list，调用方不能修改共享 tuple；当前没有基于用户历史的个性化推荐。
+
+[API](./api.md)

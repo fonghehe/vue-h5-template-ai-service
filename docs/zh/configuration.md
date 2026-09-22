@@ -16,4 +16,8 @@
 | 配额 | `AI_RATE_LIMIT_PER_MINUTE=20`、`AI_CONCURRENT_STREAM_LIMIT=3`、`AI_DAILY_TOKEN_LIMIT=200000`、`REDIS_URL` 未设 |
 | 观测 | `METRICS_ENABLED=true`、`OTEL_ENABLED=false`、`OTEL_SERVICE_NAME=vue-h5-template-ai-service` |
 
-JWT 验证 HS256、`exp`、`iat`、`sub`、issuer、audience；用户资源始终需要用户 JWT。生产 `APP_ENV=production` 要求关闭 DEBUG/docs、JSON 日志、非空 `SERVICE_TOKEN`、非占位 JWT Secret、PostgreSQL async URL、关闭自动建表、无通配 CORS；OpenAI-compatible 还需 API Key。**生产校验并不强制 `AI_AUTH_REQUIRED=true`**，对外暴露前必须自行设定。更换 Embedding 模型/维度不会自动重建旧向量。参见[部署](/zh/deployment)。
+`APP_ENV` 支持 local、development、test、staging、production。staging/production 强制认证、Redis、明确的 Trusted Hosts、至少 32 字节的非占位 JWT 和服务密钥、关闭 DEBUG/docs、JSON 日志、异步 PostgreSQL、使用迁移而非自动建表，以及无通配 CORS。远程模型需要凭据与 HTTPS。更换 Embedding 需要主动重建向量，不会自动迁移维度。
+
+
+| Pool / HTTP | `DATABASE_POOL_SIZE=5`, `DATABASE_MAX_OVERFLOW=10`, `DATABASE_POOL_TIMEOUT=10`, `DATABASE_POOL_RECYCLE=1800`, `REDIS_MAX_CONNECTIONS=50`, `MAX_REQUEST_BYTES=6000000`, `READINESS_TIMEOUT_SECONDS=3` |
+| SSE | `AI_STREAM_TIMEOUT_SECONDS=90`, `SSE_HEARTBEAT_SECONDS=15` |

@@ -7,7 +7,7 @@ import json
 import random
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import TypeVar
 from uuid import uuid4
 
@@ -15,6 +15,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from app.core.errors import ProviderError, ProviderTimeoutError
+from app.core.logging import correlation_headers
 from app.providers.types import CompletionResult, ModelConfig, TokenUsage, ToolCall, ToolCallingResult, ToolDefinition
 from app.schemas.chat import ChatMessage
 
@@ -36,7 +37,7 @@ class LLMProvider(ABC):
     name: str = "unknown"
 
     @abstractmethod
-    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncIterator[str]:
+    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncGenerator[str, None]:
         raise NotImplementedError  # pragma: no cover
 
     @abstractmethod
@@ -75,10 +76,10 @@ class MockChatProvider(LLMProvider):
         self._delay = delay_seconds
         self._answer = answer
 
-    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncIterator[str]:
+    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncGenerator[str, None]:
         return self._generate(messages)
 
-    async def _generate(self, messages: Sequence[ChatMessage]) -> AsyncIterator[str]:
+    async def _generate(self, messages: Sequence[ChatMessage]) -> AsyncGenerator[str, None]:
         last = messages[-1].content.strip() if messages else ""
         answer = self._answer or (MOCK_ANSWER if last else "Please send a message to begin.")
         for word in answer.split(" "):
@@ -152,6 +153,7 @@ class OpenAICompatibleProvider(LLMProvider):
         max_retries: int = 3,
         retry_base_seconds: float = 0.25,
     ) -> None:
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=min(timeout, 5), pool=5))
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._default_config = ModelConfig(model=model, timeout=timeout)
@@ -159,40 +161,40 @@ class OpenAICompatibleProvider(LLMProvider):
         self._max_retries = max_retries
         self._retry_base_seconds = retry_base_seconds
 
-    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncIterator[str]:
+    def stream(self, messages: Sequence[ChatMessage], config: ModelConfig | None = None) -> AsyncGenerator[str, None]:
         return self._generate(messages, config or self._default_config)
 
-    async def _generate(self, messages: Sequence[ChatMessage], config: ModelConfig) -> AsyncIterator[str]:
+    async def _generate(self, messages: Sequence[ChatMessage], config: ModelConfig) -> AsyncGenerator[str, None]:
         emitted = 0
         attempt = 0
         while True:
             try:
-                async with (
-                    httpx.AsyncClient(timeout=config.timeout) as client,
-                    client.stream(
-                        "POST",
-                        f"{self._base_url}/chat/completions",
-                        json=self._body(messages, config, stream=True),
-                        headers=self._headers,
-                    ) as response,
-                ):
+                async with self._client.stream(
+                    "POST",
+                    f"{self._base_url}/chat/completions",
+                    json=self._body(messages, config, stream=True),
+                    headers=self._headers,
+                    timeout=httpx.Timeout(config.timeout, connect=min(config.timeout, 5), pool=5),
+                ) as response:
                     if response.status_code >= 400:
                         _raise_for_status(response.status_code)
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
                         payload = line[5:].strip()
-                        if not payload or payload == "[DONE]":
+                        if payload == "[DONE]":
+                            return
+                        if not payload:
                             continue
                         delta = _extract_delta(payload)
                         if not delta:
                             continue
                         emitted += len(delta)
                         if emitted > self._max_output_chars:
-                            return
+                            raise ProviderError("AI output limit exceeded")
                         yield delta
                     return
-            except (httpx.TimeoutException, httpx.TransportError, ProviderError) as exc:
+            except (httpx.TimeoutException, httpx.TransportError, ProviderError, json.JSONDecodeError) as exc:
                 if emitted or not _retryable(exc) or attempt >= self._max_retries:
                     if isinstance(exc, httpx.TimeoutException):
                         raise ProviderTimeoutError() from exc
@@ -206,7 +208,9 @@ class OpenAICompatibleProvider(LLMProvider):
         chosen = config or self._default_config
         payload = await self._post(self._body(messages, chosen, stream=False), chosen.timeout)
         try:
-            content = str(payload["choices"][0]["message"]["content"])  # type: ignore[index]
+            content = payload["choices"][0]["message"]["content"]  # type: ignore[index]
+            if not isinstance(content, str) or len(content) > self._max_output_chars:
+                raise ProviderError("Malformed or oversized AI provider response")
             usage = TokenUsage.model_validate(payload.get("usage", {}))
             return CompletionResult(content=content, model=str(payload.get("model", chosen.model)), usage=usage)
         except (KeyError, IndexError, TypeError, ValidationError) as exc:
@@ -281,15 +285,19 @@ class OpenAICompatibleProvider(LLMProvider):
     async def _post(self, body: dict[str, object], request_timeout: float) -> dict[str, object]:
         for attempt in range(self._max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=request_timeout) as client:
-                    response = await client.post(f"{self._base_url}/chat/completions", json=body, headers=self._headers)
+                response = await self._client.post(
+                    f"{self._base_url}/chat/completions",
+                    json=body,
+                    headers=self._headers,
+                    timeout=httpx.Timeout(request_timeout, connect=min(request_timeout, 5), pool=5),
+                )
                 if response.status_code >= 400:
                     _raise_for_status(response.status_code)
                 value = response.json()
                 if not isinstance(value, dict):
                     raise ProviderError("Malformed AI provider response")
                 return value
-            except (httpx.TimeoutException, httpx.TransportError, ProviderError) as exc:
+            except (httpx.TimeoutException, httpx.TransportError, ProviderError, json.JSONDecodeError) as exc:
                 if not _retryable(exc) or attempt >= self._max_retries:
                     if isinstance(exc, httpx.TimeoutException):
                         raise ProviderTimeoutError() from exc
@@ -298,6 +306,9 @@ class OpenAICompatibleProvider(LLMProvider):
                     raise ProviderError("AI provider unavailable") from exc
                 await self._backoff(attempt)
         raise ProviderError("AI provider unavailable")  # pragma: no cover
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     def _body(self, messages: Sequence[ChatMessage], config: ModelConfig, *, stream: bool) -> dict[str, object]:
         wire_messages: list[dict[str, object]] = []
@@ -325,7 +336,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+        return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json", **correlation_headers()}
 
     async def _backoff(self, attempt: int) -> None:
         delay = self._retry_base_seconds * (2**attempt) + random.uniform(0, self._retry_base_seconds)  # noqa: S311

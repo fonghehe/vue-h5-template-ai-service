@@ -29,6 +29,9 @@ class Tool(ABC):
             input_schema=self.input_model.model_json_schema(),
         )
 
+    async def aclose(self) -> None:
+        return None
+
     async def run(self, arguments: dict[str, Any], context: ToolContext) -> Any:
         validated = self.input_model.model_validate(arguments)
         return await self.execute(validated, context)
@@ -51,3 +54,7 @@ class ToolRegistry:
         if tool is None:
             raise AppError("Tool is not registered", status_code=400)
         return await tool.run(arguments, context)
+
+    async def aclose(self) -> None:
+        for tool in self._tools.values():
+            await tool.aclose()

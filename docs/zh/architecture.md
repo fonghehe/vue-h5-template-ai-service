@@ -34,3 +34,7 @@ Redis -> 请求计数、流并发配额、会话锁
 `create_app()` 安装 TrustedHost、CORS、请求 ID、路由和异常处理；lifespan 创建 Provider、Embedding、DB、限流器、锁、工具及工作流。旧 `/api/ai/chat` 接受客户端 `messages[]`，不持久化。新会话路由校验 JWT 所有权、保存用户消息、构建受限上下文，再走直接流或 Agent。成功完成后保存一条助手消息和一条用量记录。断连时可能只保留用户消息，客户端需允许这种状态。
 
 JSON 错误使用 `{code,message,data,error,requestId}`；SSE 开始后错误改用 `error` 帧。PostgreSQL 保存会话、消息、文档、向量与用量；SQLite 仅作本地/测试回退。未配 Redis 时计数、流配额、锁均为进程内；多副本应配置 Redis。Go 服务不在此仓库，商品工具固定调用配置域名下的 `/api/v1/products`，具体 Go 部署契约需单独验证。继续阅读[会话](/zh/conversations)、[Agent/RAG](/zh/agent-rag)和[扩展](/zh/extending)。
+
+## 事务与资源所有权
+
+HTTP -> 纯 ASGI 上下文/请求大小中间件 -> Router/Dependency -> ChatService 或 ConversationService -> Repository/Provider。`AsyncExitStack` 在每个资源创建后立即登记关闭回调，覆盖部分启动失败。Repository 只 flush，Service 控制事务。会话使用短 Session，在摘要和最终模型生成前释放连接。成功轮次将工具历史、助手消息和用量原子提交后才发 finish；取消仍可能保留用户消息。Redis 使用共享有界连接池、按令牌持有的过期流租约和会话锁。ASGI 计时覆盖完整 SSE，ContextVar 日志隔离并发请求。

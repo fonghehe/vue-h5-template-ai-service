@@ -2,7 +2,7 @@
 
 ## ワークフローの条件
 
-`mode="chat"` は Provider を直接ストリームし、`agent` は LangGraph を使います。`auto` は商品・計算・時刻のキーワードでのみ Agent に入ります。`app/services/agent.py` のグラフは `START -> classify -> agent -> (tool -> agent)* -> END`。現状の `classify` は経路をラベル付けするだけで、モデル分類ではありません。`AGENT_MAX_ITERATIONS` が反復上限です。ツール進捗はストリームできますが、最終回答の `delta` はグラフ完了後に分割され、**トークン単位のライブ配信ではありません**。
+`mode="chat"` は直接ストリーム、`mode="agent"` は制限付き LangGraph ツール計画です。auto の商品・計算・時刻キーワード判定は `app/services/conversations.py` にあります。登録ツールの選択と実行の後、Provider が最終回答を逐次生成します。計画は最大 256 出力 tokens で表示しません。完成した回答の分割ではありません。反復回数、全体の期限、出力上限で作業を制限します。
 
 ## ツールの境界
 
@@ -17,3 +17,5 @@
 ## 構造化出力と評価
 
 `LLMProvider.structured_output()` は Pydantic で検証し、HTTP アダプターは無効な JSON を一度修復再試行します。`app/schemas/knowledge.py` の `ProductRecommendation` はサンプル schema で、現在の公開 API は返しません。`evals/run.py` は計算器 1 件とその他の Mock 応答が空でないことを確認する簡易オフラインテストで、**定量的 RAG ベンチマークではありません**。pytest に検索・ツール・schema の対象テストがあります。緑の結果だけで実モデル品質は判断できません。
+
+metadata は JSON object が必須です。解析は制限付き worker thread、PDF signature 確認、basename 化、抽出文字数/chunk 数制限、64 chunk 単位の embedding を使います。文書と chunk は一括 commit し、SQLite の外部キー cascade も有効です。厳格な PDF 隔離には、別の resource-limited parser worker が必要です。

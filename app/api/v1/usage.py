@@ -13,7 +13,7 @@ from app.db.session import get_db_session
 from app.schemas.conversation import UsageView
 from app.schemas.envelope import ApiResponse
 
-router = APIRouter(prefix="/api/usage", tags=["usage"])
+router = APIRouter(prefix="/usage", tags=["usage"])
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 
 

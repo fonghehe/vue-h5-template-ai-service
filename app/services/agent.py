@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any, NotRequired, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -13,6 +13,7 @@ from app.core.observability import TOOL_CALLS, span
 from app.providers.base import LLMProvider
 from app.providers.types import TokenUsage
 from app.schemas.chat import ChatMessage, ChatToolCall
+from app.services.context import estimate_tokens
 from app.services.model_router import ModelRouter
 from app.tools.base import ToolContext, ToolRegistry
 
@@ -56,11 +57,25 @@ class AgentWorkflow:
             model_config = self._router.for_task("reasoning")
             if state.get("model"):
                 model_config = model_config.model_copy(update={"model": state["model"]})
-            result = await self._provider.tool_calling(state["messages"], self._tools.definitions, model_config)
+            # Planning is bounded and never used as the displayed answer.
+            model_config = model_config.model_copy(update={"max_tokens": 256})
+            planning = [
+                ChatMessage(
+                    role="system",
+                    content=(
+                        "Select registered tools if needed. Otherwise return no tool calls. "
+                        "Do not write the final answer."
+                    ),
+                ),
+                *state["messages"],
+            ]
+            result = await self._provider.tool_calling(planning, self._tools.definitions, model_config)
         usage = _merge_usage(state["usage"], result.usage)
         next_iteration = state["iteration"] + 1
+        if len(result.tool_calls) > 8:
+            raise ValueError("Too many tool calls")
         calls = [call.model_dump() for call in result.tool_calls]
-        answer = result.content
+        answer = ""
         if calls and next_iteration >= self._max_iterations:
             calls = []
             answer = "I could not complete the tool workflow within the safe iteration limit."
@@ -96,10 +111,15 @@ class AgentWorkflow:
                     value = await self._tools.execute(
                         name, dict(call["arguments"]), ToolContext(user_id=state["user_id"])
                     )
+                if len(json.dumps(value, ensure_ascii=False)) > 10_000:
+                    raise ValueError("Tool result exceeds context limit")
                 TOOL_CALLS.labels(tool=name, status="ok").inc()
                 result = {"tool": name, "callId": call["id"], "result": value}
             except Exception:
-                TOOL_CALLS.labels(tool=name, status="error").inc()
+                TOOL_CALLS.labels(
+                    tool=name if name in {tool.name for tool in self._tools.definitions} else "unregistered",
+                    status="error",
+                ).inc()
                 logger.exception("tool execution failed", extra={"tool": name, "userId": state["user_id"]})
                 result = {"tool": name, "callId": call["id"], "error": "Tool execution failed"}
             results.append(result)
@@ -115,7 +135,7 @@ class AgentWorkflow:
     async def run(self, state: AgentState) -> AgentState:
         return cast(AgentState, await self.graph.ainvoke(state))
 
-    async def stream(self, state: AgentState) -> AsyncIterator[dict[str, Any]]:
+    async def stream(self, state: AgentState) -> AsyncGenerator[dict[str, Any], None]:
         """Expose graph node progress without leaking model reasoning."""
         current: dict[str, Any] = dict(state)
         emitted_results = 0
@@ -135,6 +155,25 @@ class AgentWorkflow:
                     for result in results[emitted_results:]:
                         yield {"type": "tool_result", **result}
                     emitted_results = len(results)
+        if current["answer"]:
+            yield {"type": "delta", "delta": current["answer"]}
+        else:
+            config = self._router.for_task("reasoning")
+            if current.get("model"):
+                config = config.model_copy(update={"model": current["model"]})
+            completion_tokens = 0
+            final_stream = self._provider.stream(current["messages"], config)
+            try:
+                async for delta in final_stream:
+                    completion_tokens += estimate_tokens(delta)
+                    yield {"type": "delta", "delta": delta}
+            finally:
+                await final_stream.aclose()
+            usage = current["usage"]
+            prompt_tokens = sum(estimate_tokens(message.content) for message in current["messages"])
+            usage["promptTokens"] += prompt_tokens
+            usage["completionTokens"] += completion_tokens
+            usage["totalTokens"] += prompt_tokens + completion_tokens
         yield {"type": "answer", "state": cast(AgentState, current)}
 
 

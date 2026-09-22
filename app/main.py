@@ -3,25 +3,25 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from uuid import uuid4
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.responses import Response
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+from starlette.exceptions import HTTPException
 
 from app import __version__
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import CODE_INTERNAL, CODE_VALIDATION, AppError
 from app.core.logging import configure_logging
-from app.core.observability import configure_tracing, span
+from app.core.middleware import RequestContextMiddleware
+from app.core.observability import configure_tracing
 from app.db.session import Database
 from app.providers.factory import create_chat_provider, create_embedding_provider
 from app.schemas.envelope import ApiResponse
@@ -43,65 +43,73 @@ REQUEST_ID_HEADER = "X-Request-ID"
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Create and dispose of process-wide dependencies."""
     settings = get_settings()
-    configure_logging(settings.log_level, settings.log_format)
+    configure_logging(settings.log_level, settings.log_format, environment=settings.app_env)
     if settings.otel_enabled:
         configure_tracing(settings.otel_service_name)
 
-    app.state.settings = settings
-    app.state.chat_provider = create_chat_provider(settings)
-    app.state.embedding_provider = create_embedding_provider(settings)
-    app.state.rate_limiter = build_rate_limiter(settings.redis_url)
-    app.state.database = Database.create(settings.database_url)
-    if settings.database_auto_create:
-        await app.state.database.create_schema()
-    app.state.model_router = ModelRouter(settings)
-    app.state.prompt_registry = PromptRegistry()
-    app.state.context_builder = ContextBuilder(
-        app.state.chat_provider,
-        app.state.model_router,
-        app.state.prompt_registry,
-        token_budget=settings.ai_context_token_budget,
-    )
-    app.state.conversation_locks = ConversationLockManager(settings.redis_url)
-    app.state.stream_quota = StreamQuota(settings.redis_url)
-    app.state.tool_registry = ToolRegistry(
-        [
-            CurrentTimeTool(),
-            CalculatorTool(),
-            ProductSearchTool(
-                base_url=settings.business_service_url,
-                service_token=settings.business_service_token,
-                timeout=settings.business_service_timeout_seconds,
-            ),
-        ]
-    )
-    app.state.agent_workflow = AgentWorkflow(
-        app.state.chat_provider,
-        app.state.tool_registry,
-        app.state.model_router,
-        settings.agent_max_iterations,
-    )
+    async with AsyncExitStack() as resources:
+        app.state.settings = settings
+        app.state.redis = None
+        if settings.redis_url:
+            app.state.redis = Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_timeout=3,
+                socket_connect_timeout=3,
+                max_connections=settings.redis_max_connections,
+            )
+            resources.push_async_callback(app.state.redis.aclose)
+        app.state.chat_provider = create_chat_provider(settings)
+        resources.push_async_callback(app.state.chat_provider.aclose)
+        app.state.embedding_provider = create_embedding_provider(settings)
+        resources.push_async_callback(app.state.embedding_provider.aclose)
+        app.state.rate_limiter = build_rate_limiter(settings.redis_url, redis=app.state.redis)
+        resources.push_async_callback(app.state.rate_limiter.aclose)
+        app.state.database = Database.create(settings.database_url, settings=settings)
+        resources.push_async_callback(app.state.database.aclose)
+        if settings.database_auto_create:
+            await app.state.database.create_schema()
+        app.state.model_router = ModelRouter(settings)
+        app.state.prompt_registry = PromptRegistry()
+        app.state.context_builder = ContextBuilder(
+            app.state.chat_provider,
+            app.state.model_router,
+            app.state.prompt_registry,
+            token_budget=settings.ai_context_token_budget,
+        )
+        app.state.conversation_locks = ConversationLockManager(
+            settings.redis_url, lease_seconds=settings.ai_stream_timeout_seconds + 30, redis=app.state.redis
+        )
+        resources.push_async_callback(app.state.conversation_locks.aclose)
+        app.state.stream_quota = StreamQuota(
+            settings.redis_url, lease_seconds=settings.ai_stream_timeout_seconds + 30, redis=app.state.redis
+        )
+        resources.push_async_callback(app.state.stream_quota.aclose)
+        app.state.tool_registry = ToolRegistry(
+            [
+                CurrentTimeTool(),
+                CalculatorTool(),
+                ProductSearchTool(
+                    base_url=settings.business_service_url,
+                    service_token=settings.business_service_token,
+                    timeout=settings.business_service_timeout_seconds,
+                ),
+            ]
+        )
+        resources.push_async_callback(app.state.tool_registry.aclose)
+        app.state.agent_workflow = AgentWorkflow(
+            app.state.chat_provider,
+            app.state.tool_registry,
+            app.state.model_router,
+            settings.agent_max_iterations,
+        )
 
-    logger.info(
-        "ai service starting",
-        extra={
-            "version": __version__,
-            "env": settings.app_env,
-            "provider": settings.ai_provider,
-            "authRequired": settings.ai_auth_required,
-        },
-    )
-
-    try:
+        logger.info(
+            "ai service starting",
+            extra={"version": __version__, "env": settings.app_env, "provider": settings.ai_provider},
+        )
         yield
-    finally:
-        await app.state.rate_limiter.aclose()
-        await app.state.stream_quota.aclose()
-        await app.state.conversation_locks.aclose()
-        await app.state.embedding_provider.aclose()
-        await app.state.chat_provider.aclose()
-        await app.state.database.aclose()
-        logger.info("ai service stopped")
+    logger.info("ai service stopped")
 
 
 def create_app() -> FastAPI:
@@ -132,46 +140,11 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         expose_headers=[REQUEST_ID_HEADER],
     )
-    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RequestContextMiddleware, max_request_bytes=settings.max_request_bytes)
 
     _register_exception_handlers(app)
     app.include_router(api_router)
     return app
-
-
-class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Assign a correlation id and emit one access log line per request."""
-
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or str(uuid4())
-        request.state.request_id = request_id
-
-        started = time.perf_counter()
-        try:
-            with span("http.request", method=request.method, path=request.url.path, request_id=request_id):
-                response = await call_next(request)
-        except Exception:
-            # Unhandled errors are logged here so that even a crash before the
-            # exception handlers run still leaves a trace with the request id.
-            logger.exception(
-                "unhandled error",
-                extra={"requestId": request_id, "path": request.url.path},
-            )
-            raise
-
-        duration_ms = round((time.perf_counter() - started) * 1000, 2)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        logger.info(
-            "http request",
-            extra={
-                "requestId": request_id,
-                "method": request.method,
-                "path": request.url.path,
-                "status": response.status_code,
-                "durationMs": duration_ms,
-            },
-        )
-        return response
 
 
 def _register_exception_handlers(app: FastAPI) -> None:
@@ -193,6 +166,24 @@ def _register_exception_handlers(app: FastAPI) -> None:
         else:
             logger.warning("request rejected", extra={"code": exc.code, "detail": exc.message})
         return JSONResponse(status_code=exc.status_code, content=payload.model_dump(by_alias=True))
+
+    @app.exception_handler(RedisError)
+    async def handle_redis_error(request: Request, exc: RedisError) -> JSONResponse:
+        payload = ApiResponse[None](
+            code=5030, message="Coordination backend unavailable", requestId=getattr(request.state, "request_id", None)
+        )
+        logger.error("redis operation failed", extra={"errorType": type(exc).__name__})
+        return JSONResponse(status_code=503, content=payload.model_dump(by_alias=True))
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_error(request: Request, exc: HTTPException) -> JSONResponse:
+        code = {401: 4010, 403: 4030, 404: 4040, 409: 4090, 422: 4001, 429: 4290}.get(exc.status_code, 4000)
+        payload = ApiResponse[None](
+            code=code,
+            message=str(exc.detail) if exc.status_code < 500 else "Internal server error",
+            requestId=getattr(request.state, "request_id", None),
+        )
+        return JSONResponse(status_code=exc.status_code, content=payload.model_dump(by_alias=True), headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -227,6 +218,7 @@ def _register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=payload.model_dump(by_alias=True),
+            headers={REQUEST_ID_HEADER: getattr(request.state, "request_id", "unknown")},
         )
 
 

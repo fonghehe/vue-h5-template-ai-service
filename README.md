@@ -10,7 +10,7 @@ This is a Python service, not a Vue frontend. The sibling Go business service is
 
 ```bash
 cp .env.example .env
-uv sync --dev
+uv sync --frozen --dev
 uv run uvicorn app.main:app --reload --port 8001
 curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"Hello"}]}'
 ```
@@ -32,6 +32,25 @@ uv run ruff format --check .
 uv run mypy app
 cd docs && npm run docs:typecheck && npm run docs:build
 ```
+
+## Architecture and maintenance
+
+Python 3.12–3.14; uv freezes FastAPI/Pydantic v2, SQLAlchemy 2 async, Alembic, Redis and httpx. HTTP routes call focused services; repositories flush, and services own transactions. Lifespan closes pooled resources even on startup failure. Both `/api/*` and `/api/v1/*` work. See [the audit and implementation plan](./ARCHITECTURE_REVIEW.md) and [verified engineering results](./ENGINEERING_REPORT.md).
+
+## Database and deployment
+
+The local SQLite fallback can auto-create tables. Production uses PostgreSQL/pgvector, Redis and explicit migrations:
+
+```bash
+uv run alembic upgrade head
+uv run alembic check
+curl http://localhost:8001/health
+curl http://localhost:8001/ready
+```
+
+Set production environment variables before starting; staging/production require authentication, strong secrets, Redis, explicit hosts, JSON logs, disabled docs and `DATABASE_AUTO_CREATE=false`. Run migrations once per deployment before replicas start. The multi-stage image runs as non-root; configure proxy buffering, trusted proxy IPs and a shutdown grace period longer than the stream deadline. Read [deployment](./docs/deployment.md) for concrete settings. JWT issuance remains in the sibling Go service. No user/order/password system is duplicated here.
+
+Tests default to isolated SQLite and mock HTTP/model adapters. Optional PostgreSQL/Redis tests require `AI_TEST_DATABASE_URL` pointing to a disposable `vh5_ai_test` DB and `AI_TEST_REDIS_URL` using DB 15; run `uv run pytest -m integration`. CI supplies these dependencies and verifies migration round trips. Model quality, Go integration, tracing exporters and billing remain explicit operational boundaries.
 
 ## License
 

@@ -103,7 +103,7 @@ async def test_agent_stream_emits_tool_lifecycle_before_answer(settings) -> None
         "route": "",
     }
     events = [event async for event in workflow.stream(state)]
-    assert [event["type"] for event in events] == ["tool_start", "tool_result", "answer"]
+    assert [event["type"] for event in events] == ["tool_start", "tool_result", "delta", "answer"]
 
 
 async def test_product_tool_uses_only_configured_url_and_forwards_context(

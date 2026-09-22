@@ -18,4 +18,8 @@
 
 JWT validation enforces HS256, `exp`, `iat`, `sub`, issuer and audience. Persistent resources always require a **user** JWT, even if anonymous legacy chat is allowed. Match the Go issuer settings.
 
-For `APP_ENV=production`, validation requires `DEBUG=false`, `DOCS_ENABLED=false`, `LOG_FORMAT=json`, nonempty `SERVICE_TOKEN`, non-placeholder `JWT_SECRET`, a PostgreSQL async URL, `DATABASE_AUTO_CREATE=false` and no wildcard CORS. OpenAI-compatible mode also needs `AI_API_KEY`. **Production validation does not require `AI_AUTH_REQUIRED=true`**; explicitly set it before exposure. Changing embedding model/dimensions requires compatible stored vectors and migration planning; it does not reindex automatically. See [Deployment](/deployment).
+`APP_ENV` accepts local, development, test, staging and production. Staging and production require `AI_AUTH_REQUIRED=true`, Redis, explicit trusted hosts, non-placeholder JWT and service secrets of at least 32 bytes, disabled DEBUG/docs, JSON logs, asynchronous PostgreSQL, migrations instead of auto-create, and no wildcard CORS. Hosted providers require credentials and HTTPS. Embedding changes require deliberate reindexing; dimensions are not automatically migrated.
+
+
+| Pool / HTTP | `DATABASE_POOL_SIZE=5`, `DATABASE_MAX_OVERFLOW=10`, `DATABASE_POOL_TIMEOUT=10`, `DATABASE_POOL_RECYCLE=1800`, `REDIS_MAX_CONNECTIONS=50`, `MAX_REQUEST_BYTES=6000000`, `READINESS_TIMEOUT_SECONDS=3` |
+| SSE | `AI_STREAM_TIMEOUT_SECONDS=90`, `SSE_HEARTBEAT_SECONDS=15` |
