@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack
 from typing import cast
 
 import anyio
@@ -57,8 +58,9 @@ class QuotaStreamingResponse(StreamingResponse):
                 await super().__call__(scope, receive, send)
         finally:
             with anyio.CancelScope(shield=True):
-                try:
-                    await cast(ClosableIterator[str], self.body_iterator).aclose()
-                    await cast(ClosableIterator[str], self._source).aclose()
-                finally:
-                    await self._quota.release(self._identity, self._token)
+                # Run every cleanup even when an earlier close fails. Register
+                # in reverse order: body, source, then the token-owned quota.
+                async with AsyncExitStack() as cleanup:
+                    cleanup.push_async_callback(self._quota.release, self._identity, self._token)
+                    cleanup.push_async_callback(cast(ClosableIterator[str], self._source).aclose)
+                    cleanup.push_async_callback(cast(ClosableIterator[str], self.body_iterator).aclose)

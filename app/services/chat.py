@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator
@@ -29,9 +30,10 @@ class ChatService:
     async def stream(self, payload: ChatRequest, conversation_id: str, request_id: str) -> AsyncGenerator[str, None]:
         started = time.perf_counter()
         ACTIVE_STREAMS.inc()
-        source = self.provider.stream(payload.messages)
+        source: AsyncGenerator[str, None] | None = None
         try:
             yield encode_sse(StartChunk(id=conversation_id))
+            source = self.provider.stream(payload.messages)
             emitted = 0
             async for delta in source:
                 if delta and emitted == 0:
@@ -43,6 +45,9 @@ class ChatService:
                     yield encode_sse(DeltaChunk(delta=delta))
             AI_REQUESTS.labels(path="chat", status="ok").inc()
             yield encode_sse(FinishChunk(reason="stop"))
+        except asyncio.CancelledError:
+            AI_REQUESTS.labels(path="chat", status="cancelled").inc()
+            raise
         except Exception as exc:
             AI_REQUESTS.labels(path="chat", status="error").inc()
             PROVIDER_ERRORS.labels(provider=self.provider.name, kind=type(exc).__name__).inc()
@@ -55,6 +60,9 @@ class ChatService:
                 )
             )
         finally:
-            await source.aclose()
-            ACTIVE_STREAMS.dec()
-            AI_DURATION.labels(path="chat").observe(time.perf_counter() - started)
+            try:
+                if source is not None:
+                    await source.aclose()
+            finally:
+                ACTIVE_STREAMS.dec()
+                AI_DURATION.labels(path="chat").observe(time.perf_counter() - started)

@@ -19,3 +19,7 @@
 `LLMProvider.structured_output()` 用 Pydantic 验证；HTTP 适配器遇到无效 JSON 会修复重试一次。`ProductRecommendation` 是 `app/schemas/knowledge.py` 中的示例 schema，当前**没有**公共 API 返回它。`evals/run.py` 只是离线冒烟检查：一个计算器案例和其他 Mock 补全文本非空检查，**不是**定量 RAG 基准。pytest 还覆盖部分检索、工具、结构化输出行为；绿灯不等于真实模型质量合格。
 
 上传 metadata 必须是 JSON 对象；解析在有界工作线程执行，PDF 检查文件签名，文件名只保留 basename，提取文字和分块数量有上限，Embedding 按 64 块批处理。文档与分块原子提交；SQLite 开启外键级联。对不可信 PDF 要求严格隔离时，应使用单独且受资源限制的解析 Worker。
+
+## SQLite 回退检索的排序
+
+PostgreSQL 继续使用已有向量查询。SQLite 回退路径对当前用户的候选片段计算分数，通过 `heapq.nlargest` 只保留最好的 `top_k` 个结果对象，不再构造第二份全量结果列表后排序。同分时保留候选顺序，引用信息和用户隔离不变。K 较小时，排序阶段保留 O(K) 个结果，计算复杂度为 O(N log K)。仓储加载候选和生成 embedding 仍各自消耗内存与时间；这不等于数据库流式读取，也不是模型链路整体性能结论。

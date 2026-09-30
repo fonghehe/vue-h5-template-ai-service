@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import math
 from dataclasses import dataclass
+from heapq import nlargest
 from pathlib import Path
 from typing import Any
 
@@ -85,15 +86,17 @@ class KnowledgeService:
                 for chunk, document, score in database_results
             ]
         candidates = await self._repository.chunks(user_id)
-        scored = [
+        scored = (
             RetrievedChunk(
                 content=chunk.content,
                 score=_cosine(query_vector, list(chunk.embedding)),
                 citation={"documentId": document.id, "chunkId": chunk.id, "title": document.title},
             )
             for chunk, document in candidates
-        ]
-        return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
+        )
+        # SQLite's fallback scores every candidate, but need only retain the
+        # best matches instead of materializing and sorting all result objects.
+        return nlargest(top_k, scored, key=lambda item: item.score)
 
 
 def _parse_document(filename: str, content_type: str | None, data: bytes) -> str:

@@ -118,3 +118,46 @@ async def test_response_releases_quota_when_sending_headers_fails() -> None:
     with pytest.raises(ClientDisconnect):
         await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
     assert quota._leases == {}
+
+
+async def test_response_closes_source_even_when_body_cleanup_fails() -> None:
+    from typing import Self
+
+    from app.api.streaming import QuotaStreamingResponse
+
+    class Iterator:
+        def __init__(self, *, fail_close: bool = False) -> None:
+            self.closed = False
+            self.fail_close = fail_close
+
+        def __aiter__(self) -> Self:
+            return self
+
+        async def __anext__(self) -> str:
+            return "frame"
+
+        async def aclose(self) -> None:
+            self.closed = True
+            if self.fail_close:
+                raise RuntimeError("body cleanup failed")
+
+    quota = StreamQuota()
+    token = await quota.acquire("user:u", 1)
+    assert token
+    source, body = Iterator(), Iterator(fail_close=True)
+    response = QuotaStreamingResponse(
+        source, quota=quota, identity="user:u", token=token, timeout=1, heartbeat=0.1, request_id="test"
+    )
+    response.body_iterator = body
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.disconnect"}
+
+    async def send(_: object) -> None:
+        raise OSError("connection closed")
+
+    with pytest.raises(RuntimeError, match="body cleanup failed"):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+    assert body.closed
+    assert source.closed
+    assert await quota.acquire("user:u", 1) is not None

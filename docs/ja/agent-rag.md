@@ -19,3 +19,7 @@
 `LLMProvider.structured_output()` は Pydantic で検証し、HTTP アダプターは無効な JSON を一度修復再試行します。`app/schemas/knowledge.py` の `ProductRecommendation` はサンプル schema で、現在の公開 API は返しません。`evals/run.py` は計算器 1 件とその他の Mock 応答が空でないことを確認する簡易オフラインテストで、**定量的 RAG ベンチマークではありません**。pytest に検索・ツール・schema の対象テストがあります。緑の結果だけで実モデル品質は判断できません。
 
 metadata は JSON object が必須です。解析は制限付き worker thread、PDF signature 確認、basename 化、抽出文字数/chunk 数制限、64 chunk 単位の embedding を使います。文書と chunk は一括 commit し、SQLite の外部キー cascade も有効です。厳格な PDF 隔離には、別の resource-limited parser worker が必要です。
+
+## SQLite フォールバックの順位付け
+
+PostgreSQL の既存のベクトル検索は維持します。SQLite ではユーザーで絞り込んだ候補のスコアを計算し、全件分の結果リストを別途作ってソートする代わりに、`heapq.nlargest` で上位 `top_k` 件の結果オブジェクトだけを保持します。同点時の候補順、引用情報、ユーザーの分離は変わりません。K が小さい場合、順位付けで保持する結果は O(K)、計算量は O(N log K) です。候補の DB 読み込みと embedding の計算には別途メモリと時間が必要であり、DB のストリーミング取得やモデルを含む全体の性能測定を示すものではありません。
