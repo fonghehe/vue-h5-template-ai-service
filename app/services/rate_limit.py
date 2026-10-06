@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from asyncio import Lock
+from heapq import heappop, heappush
 from typing import Protocol
 
 from redis.asyncio import Redis
@@ -40,17 +41,19 @@ class MemoryRateLimiter:
 
     def __init__(self) -> None:
         self._counters: dict[str, tuple[int, float]] = {}
+        self._expirations: list[tuple[float, str]] = []
         self._lock = Lock()
 
     async def hit(self, key: str, window_seconds: int) -> int:
         async with self._lock:
-            count, expires_at = self._counters.get(key, (0, 0.0))
             now = time.monotonic()
+            self._evict(now)
+            count, expires_at = self._counters.get(key, (0, 0.0))
             if expires_at <= now:
                 count, expires_at = 0, now + window_seconds
+                heappush(self._expirations, (expires_at, key))
             count += 1
             self._counters[key] = (count, expires_at)
-            self._evict(now)
             return count
 
     async def ping(self) -> bool:
@@ -58,14 +61,15 @@ class MemoryRateLimiter:
 
     async def aclose(self) -> None:
         self._counters.clear()
+        self._expirations.clear()
 
     def _evict(self, now: float) -> None:
         """Drop expired windows so the map cannot grow without bound."""
-        if len(self._counters) < 10_000:
-            return
-        for key, (_, expires_at) in list(self._counters.items()):
-            if expires_at <= now:
-                del self._counters[key]
+        # Fixed windows never extend on a hit, so each counter has exactly one
+        # heap entry. Active identities need no scan or per-hit allocation.
+        while self._expirations and self._expirations[0][0] <= now:
+            _, key = heappop(self._expirations)
+            del self._counters[key]
 
 
 class RedisRateLimiter:

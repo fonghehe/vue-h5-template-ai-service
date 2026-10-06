@@ -35,7 +35,7 @@ cd docs && npm run docs:typecheck && npm run docs:build
 
 ## Architecture and maintenance
 
-Python 3.12–3.14; uv freezes FastAPI/Pydantic v2, SQLAlchemy 2 async, Alembic, Redis and httpx. HTTP routes call focused services; repositories flush, and services own transactions. Lifespan closes pooled resources even on startup failure. Both `/api/*` and `/api/v1/*` work. See [the audit and implementation plan](./ARCHITECTURE_REVIEW.md) and [verified engineering results](./ENGINEERING_REPORT.md).
+Python 3.12–3.14; uv freezes FastAPI/Pydantic v2, SQLAlchemy 2 async, Alembic, Redis and httpx. HTTP routes call focused services; repositories flush, and services own transactions. Lifespan closes pooled resources even on startup failure. Both `/api/*` and `/api/v1/*` work. See [the architecture](./docs/architecture.md) and [extension guide](./docs/extending.md).
 
 ## Database and deployment
 

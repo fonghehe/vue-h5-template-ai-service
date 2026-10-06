@@ -92,7 +92,7 @@ class ContextBuilder:
 
     async def _summarize(self, conversation: Conversation, messages: Sequence[Message]) -> None:
         # Summarization input is bounded independently of stored history size.
-        history = "\n".join(f"{message.role}: {message.content}" for message in messages)[-16_000:]
+        history = _history_tail(messages, 16_000)
         transcript = f"Previous summary:\n{conversation.summary}\n\n{history}" if conversation.summary else history
         prompt = self._prompts.get("conversation.summary").content
         result = await self._provider.complete(
@@ -110,3 +110,21 @@ class ContextBuilder:
     @staticmethod
     def count_tokens(messages: Sequence[ChatMessage]) -> int:
         return sum(estimate_tokens(message.content) + 4 for message in messages)
+
+
+def _history_tail(messages: Sequence[Message], limit: int) -> str:
+    """Retain the exact transcript suffix with temporary memory bounded by limit."""
+    remaining = limit
+    parts: list[str] = []
+    for message in reversed(messages):
+        if remaining <= 0:
+            break
+        if parts:
+            parts.append("\n")
+            remaining -= 1
+        if remaining <= 0:
+            break
+        frame = (f"{message.role}: " + message.content[-remaining:])[-remaining:]
+        parts.append(frame)
+        remaining -= len(frame)
+    return "".join(reversed(parts))

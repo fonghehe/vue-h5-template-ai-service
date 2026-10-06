@@ -17,12 +17,29 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+*.prof
+*.pprof
+
+# Local logs
+*.log
+logs/
+
+# Local optimization artifacts; keep AGENTS.md, AGENT.md and reusable agent/skill guides versioned
+/docs/superpowers/plans/*-backend-optimization.md
+/benchmarks/
+/docs/**/optimization-report.md
+/ARCHITECTURE_REVIEW.md
+/ENGINEERING_REPORT.md
 
 # Documentation (VitePress)
 docs/node_modules/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+docs/.vitepress/.cache/
+docs/.vitepress/.temp/
 
 # Editor and OS
 .DS_Store

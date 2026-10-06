@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import cast
@@ -82,6 +83,7 @@ class StreamQuota:
             else None
         )
         self._leases: dict[str, dict[str, float]] = {}
+        self._expirations: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._lease_seconds = lease_seconds
         self._lock = asyncio.Lock()
 
@@ -97,17 +99,24 @@ class StreamQuota:
             return token if acquired else None
         async with self._lock:
             now = time.monotonic()
-            # Bound stale identities as well as per-identity leases.
-            for identity, entries in list(self._leases.items()):
-                active = {key: expiry for key, expiry in entries.items() if expiry > now}
-                if active:
-                    self._leases[identity] = active
-                else:
+            # Every lease has the same duration, so insertion order is expiry
+            # order. Release removes its exact entry; no stale queue records
+            # accumulate for streams that finish before their deadline.
+            while self._expirations:
+                first = next(iter(self._expirations))
+                if self._expirations[first] > now:
+                    break
+                (identity, expired_token), _ = self._expirations.popitem(last=False)
+                entries = self._leases[identity]
+                del entries[expired_token]
+                if not entries:
                     del self._leases[identity]
-            entries = self._leases.setdefault(user_id, {})
+            entries = self._leases.get(user_id, {})
             if len(entries) >= limit:
                 return None
             entries[token] = now + self._lease_seconds
+            self._leases[user_id] = entries
+            self._expirations[user_id, token] = entries[token]
             return token
 
     async def release(self, user_id: str, token: str) -> None:
@@ -117,6 +126,7 @@ class StreamQuota:
         async with self._lock:
             entries = self._leases.get(user_id, {})
             entries.pop(token, None)
+            self._expirations.pop((user_id, token), None)
             if not entries:
                 self._leases.pop(user_id, None)
 

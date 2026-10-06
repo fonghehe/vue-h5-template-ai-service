@@ -33,7 +33,7 @@ cd docs && npm run docs:typecheck && npm run docs:build
 
 ## 架构与维护
 
-支持 Python 3.12–3.14，uv 锁定 FastAPI/Pydantic v2、SQLAlchemy 2 异步、Alembic、Redis、httpx。HTTP 路由调用小型 Service；Repository 只 flush，Service 控制事务。lifespan 在启动失败时也会关闭连接池。支持旧 `/api/*` 和 `/api/v1/*`。详见[审计与改造方案](./ARCHITECTURE_REVIEW.md)及[实际验收报告](./ENGINEERING_REPORT.md)。
+支持 Python 3.12–3.14，uv 锁定 FastAPI/Pydantic v2、SQLAlchemy 2 异步、Alembic、Redis、httpx。HTTP 路由调用小型 Service；Repository 只 flush，Service 控制事务。lifespan 在启动失败时也会关闭连接池。支持旧 `/api/*` 和 `/api/v1/*`。详见[架构说明](./docs/architecture.md)及[扩展指南](./docs/extending.md)。
 
 ## 数据库与部署
 

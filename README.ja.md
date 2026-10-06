@@ -33,7 +33,7 @@ cd docs && npm run docs:typecheck && npm run docs:build
 
 ## アーキテクチャと保守
 
-Python 3.12–3.14 に対応し、uv で FastAPI/Pydantic v2、SQLAlchemy 2 async、Alembic、Redis、httpx を固定します。HTTP route は小さな Service を呼び、Repository は flush のみ、Service が transaction を管理します。lifespan は起動途中の失敗でも pool を閉じます。旧 `/api/*` と `/api/v1/*` の両方を利用できます。[監査と変更計画](./ARCHITECTURE_REVIEW.md)、[実際の検証結果](./ENGINEERING_REPORT.md)も参照してください。
+Python 3.12–3.14 に対応し、uv で FastAPI/Pydantic v2、SQLAlchemy 2 async、Alembic、Redis、httpx を固定します。HTTP route は小さな Service を呼び、Repository は flush のみ、Service が transaction を管理します。lifespan は起動途中の失敗でも pool を閉じます。旧 `/api/*` と `/api/v1/*` の両方を利用できます。[アーキテクチャ](./docs/architecture.md)と[拡張ガイド](./docs/extending.md)も参照してください。
 
 ## データベースとデプロイ
 
