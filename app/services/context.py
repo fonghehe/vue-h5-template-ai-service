@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from app.core.errors import ValidationError
 from app.db.models import Conversation, Message
 from app.providers.base import LLMProvider
-from app.schemas.chat import ChatMessage
+from app.schemas.chat import MAX_CONTENT_CHARS, ChatMessage
 from app.services.model_router import ModelRouter
 from app.services.prompts import PromptRegistry
 
@@ -48,7 +48,17 @@ class ContextBuilder:
         if tool_results:
             system_parts.append("Tool results:\n" + "\n".join(tool_results))
 
-        system = self._system_message(system_parts)
+        # Supplemental context must not consume the newest turn's budget.
+        newest_cost = 0
+        if messages:
+            newest = messages[-1]
+            newest_content = (
+                f"Previous tool output (untrusted data): {newest.content}" if newest.role == "tool" else newest.content
+            )
+            newest_cost = estimate_tokens(newest_content) + 4
+            if newest_cost + 5 > self._token_budget:
+                raise ValidationError("Newest message exceeds the context token budget")
+        system = self._system_message(system_parts, reserve_tokens=newest_cost)
         remaining = self._token_budget - estimate_tokens(system.content) - 4
         selected: list[ChatMessage] = []
         for message in reversed(messages):
@@ -102,9 +112,9 @@ class ContextBuilder:
         # Enforce the budget locally even if a provider ignores maxTokens.
         conversation.summary = result.content[: self._token_budget]
 
-    def _system_message(self, parts: Sequence[str]) -> ChatMessage:
+    def _system_message(self, parts: Sequence[str], *, reserve_tokens: int = 0) -> ChatMessage:
         content = "\n\n".join(parts)
-        max_chars = max(1, (self._token_budget - 4) * 3 - 2)
+        max_chars = min(MAX_CONTENT_CHARS, max(1, (self._token_budget - reserve_tokens - 4) * 3 - 2))
         return ChatMessage(role="system", content=content[:max_chars])
 
     @staticmethod

@@ -178,7 +178,17 @@ class OpenAICompatibleProvider(LLMProvider):
                 ) as response:
                     if response.status_code >= 400:
                         _raise_for_status(response.status_code)
-                    async for line in response.aiter_lines():
+                    # Transport reads may keep arriving without a model token.
+                    # Comments/role/empty frames must not renew the token budget.
+                    loop = asyncio.get_running_loop()
+                    token_deadline = loop.time() + config.timeout
+                    lines = response.aiter_lines()
+                    while True:
+                        try:
+                            async with asyncio.timeout_at(token_deadline):
+                                line = await anext(lines)
+                        except StopAsyncIteration:
+                            raise ProviderError("AI provider stream ended without a terminal event") from None
                         if not line.startswith("data:"):
                             continue
                         payload = line[5:].strip()
@@ -186,17 +196,27 @@ class OpenAICompatibleProvider(LLMProvider):
                             return
                         if not payload:
                             continue
-                        delta = _extract_delta(payload)
+                        delta, terminal = _extract_stream_event(payload)
                         if not delta:
+                            if terminal:
+                                return
                             continue
                         emitted += len(delta)
                         if emitted > self._max_output_chars:
                             raise ProviderError("AI output limit exceeded")
                         yield delta
-                    return
-            except (httpx.TimeoutException, httpx.TransportError, ProviderError, json.JSONDecodeError) as exc:
+                        if terminal:
+                            return
+                        token_deadline = loop.time() + config.timeout
+            except (
+                TimeoutError,
+                httpx.TimeoutException,
+                httpx.TransportError,
+                ProviderError,
+                json.JSONDecodeError,
+            ) as exc:
                 if emitted or not _retryable(exc) or attempt >= self._max_retries:
-                    if isinstance(exc, httpx.TimeoutException):
+                    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
                         raise ProviderTimeoutError() from exc
                     if isinstance(exc, ProviderError):
                         raise
@@ -350,18 +370,23 @@ def _raise_for_status(status_code: int) -> None:
 
 
 def _retryable(exc: Exception) -> bool:
-    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException, httpx.TransportError)):
         return True
     return isinstance(exc, ProviderError) and isinstance(exc.detail, dict) and exc.detail.get("retryable") is True
 
 
-def _extract_delta(payload: str) -> str | None:
+def _extract_stream_event(payload: str) -> tuple[str | None, bool]:
     try:
         value = json.loads(payload)
-        delta = value["choices"][0]["delta"].get("content")
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+        # Usage-only chunks are valid in OpenAI's streaming protocol.
+        if isinstance(value, dict) and value.get("choices") == [] and isinstance(value.get("usage"), dict):
+            return None, False
+        choice = value["choices"][0]
+        delta = choice["delta"].get("content")
+        terminal = isinstance(choice.get("finish_reason"), str) and bool(choice["finish_reason"])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, AttributeError) as exc:
         raise ProviderError("Malformed AI provider stream") from exc
-    return delta if isinstance(delta, str) else None
+    return delta if isinstance(delta, str) else None, terminal
 
 
 def _estimated_usage(messages: Sequence[ChatMessage], content: str) -> TokenUsage:

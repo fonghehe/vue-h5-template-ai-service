@@ -1,40 +1,37 @@
 # 架构
 
-本仓库没有前端 `src/`、页面、客户端路由、store、composable、UI 组件或 CSS 主题。外部 `@vh5/ai-chat` 消费这里的旧 SSE 端点。
+Vue 客户端从本 FastAPI 服务读取 SSE。兄弟 Go 服务负责签发 access JWT 和提供商品 API；本服务校验令牌、保存 AI 会话与文档，并按需调用注册工具。
 
 ```text
-Vue / @vh5/ai-chat -> /api/ai/chat -> FastAPI -> LLMProvider -> SSE
-Go 业务服务 -> 签发 JWT / 商品 API
-用户 JWT -> /api/conversations/{id}/messages -> ContextBuilder -> 直接流式 LLM
-                                                        | agent/auto
-                                                        v
-                                                  LangGraph -> ToolRegistry
-                                                                   |
-                                                     search_product -> Go
-用户 JWT -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
-Redis -> 请求计数、流并发配额、会话锁
+Vue -> FastAPI routes -> Services -> LLM / Embedding providers
+                            |----> Repositories -> PostgreSQL / pgvector
+                            |----> Agent -> ToolRegistry -> Go product API
+                            `----> Redis: counters / stream leases / locks
+Go -> access JWT -> FastAPI authentication
 ```
 
-## 模块边界
+## 模块职责
 
 | 路径 | 职责 |
 |---|---|
-| `app/main.py` | FastAPI 工厂、生命周期依赖、中间件、错误信封 |
-| `app/api/v1/` | chat、conversation、knowledge、usage、探针的 HTTP/SSE 边界 |
-| `app/schemas/` | Pydantic 请求、响应、SSE 类型 |
-| `app/core/` | 配置、JWT、错误、日志、观测 |
-| `app/providers/` | LLM/Embedding 中立接口、Mock/HTTP 适配器 |
-| `app/services/` | 上下文、Prompt、模型路由、Agent、检索、配额、取消 |
-| `app/tools/` | 白名单工具和参数校验 |
-| `app/db/` | SQLAlchemy async 模型、会话、按所有者查询 |
-| `alembic/`、`evals/`、`tests/` | 迁移、离线冒烟评估、pytest |
+| `app/main.py` | 应用工厂与 lifespan 资源管理 |
+| `app/api/` | HTTP/SSE 传输与依赖 |
+| `app/schemas/` | 公开请求、响应和事件契约 |
+| `app/services/` | 会话、上下文、Agent、检索与配额编排 |
+| `app/providers/` | 供应商无关的 LLM/Embedding 接口及适配器 |
+| `app/tools/` | 注册工具和参数校验 |
+| `app/db/` | 异步 Session、模型和按所有者隔离的 Repository |
+| `app/core/` | 配置、JWT 校验、错误及可观测性 |
+| `alembic/`、`tests/`、`evals/` | 迁移、行为测试和离线冒烟评估 |
 
-## 请求与数据流
+## 事务与资源归属
 
-`create_app()` 安装 TrustedHost、CORS、请求 ID、路由和异常处理；lifespan 创建 Provider、Embedding、DB、限流器、锁、工具及工作流。旧 `/api/ai/chat` 接受客户端 `messages[]`，不持久化。新会话路由校验 JWT 所有权、保存用户消息、构建受限上下文，再走直接流或 Agent。成功完成后保存一条助手消息和一条用量记录。断连时可能只保留用户消息，客户端需允许这种状态。
+Repository 只 flush，Service 决定提交或回滚。会话请求先用短事务保存用户消息，构建上下文和生成回答时不持有该事务，最后将完整回答与用量一起提交。参见[会话](./conversations.md)。
 
-JSON 错误使用 `{code,message,data,error,requestId}`；SSE 开始后错误改用 `error` 帧。PostgreSQL 保存会话、消息、文档、向量与用量；SQLite 仅作本地/测试回退。未配 Redis 时计数、流配额、锁均为进程内；多副本应配置 Redis。Go 服务不在此仓库，商品工具固定调用配置域名下的 `/api/v1/products`，具体 Go 部署契约需单独验证。继续阅读[会话](/zh/conversations)、[Agent/RAG](/zh/agent-rag)和[扩展](/zh/extending)。
+lifespan 在资源创建后立即登记清理，覆盖部分启动失败。HTTP 和 Redis 客户端共享；Session 与响应流按请求或轮次管理。SSE 包装层负责显式关闭内层迭代器。参见 [SSE](./sse.md)。
 
-## 事务与资源所有权
+## 存储与多副本协调
 
-HTTP -> 纯 ASGI 上下文/请求大小中间件 -> Router/Dependency -> ChatService 或 ConversationService -> Repository/Provider。`AsyncExitStack` 在每个资源创建后立即登记关闭回调，覆盖部分启动失败。Repository 只 flush，Service 控制事务。会话使用短 Session，在摘要和最终模型生成前释放连接。成功轮次将工具历史、助手消息和用量原子提交后才发 finish；取消仍可能保留用户消息。Redis 使用共享有界连接池、按令牌持有的过期流租约和会话锁。ASGI 计时覆盖完整 SSE，ContextVar 日志隔离并发请求。
+PostgreSQL/pgvector 保存会话、文档、向量和用量；SQLite 用于本地和测试。Redis 在副本间共享请求计数、并发流租约和会话锁；不配置时仅在进程内协调。staging/production 必须使用 Redis 和 PostgreSQL。
+
+商品工具只调用配置的 Go 地址下的 `/api/v1/products`。目标部署如何校验令牌和 `X-User-ID`，需要单独联调。参见 [Agent 与 RAG](./agent-rag.md)及[扩展指南](./extending.md)。

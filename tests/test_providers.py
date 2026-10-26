@@ -275,3 +275,144 @@ async def test_openai_provider_enforces_output_cap(monkeypatch: pytest.MonkeyPat
 def test_provider_stream_is_an_async_iterator() -> None:
     provider = MockChatProvider()
     assert isinstance(provider.stream(messages()), AsyncIterator)
+
+
+@pytest.mark.parametrize("body", [b"", b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'])
+async def test_unterminated_stream_is_error_without_replay(monkeypatch: pytest.MonkeyPatch, body: bytes) -> None:
+    calls = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=body)
+
+    patch_client(monkeypatch, httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://example.test", api_key="test", model="m", timeout=1)
+    try:
+        with pytest.raises(ProviderError, match="terminal event"):
+            await collect(provider)
+        assert calls == 1
+    finally:
+        await provider.aclose()
+
+
+async def test_finish_reason_is_terminal_and_usage_chunks_are_valid(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = (
+        b'data: {"choices":[],"usage":{"total_tokens":1}}\n\n'
+        b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n'
+    )
+    patch_client(monkeypatch, httpx.MockTransport(lambda _: httpx.Response(200, content=body)))
+    provider = OpenAICompatibleProvider(base_url="https://example.test", api_key="test", model="m", timeout=1)
+    try:
+        assert await collect(provider) == "hi"
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("first_delta", [False, True], ids=["first-token", "idle"])
+async def test_empty_frames_cannot_extend_token_timeout(monkeypatch: pytest.MonkeyPatch, first_delta: bool) -> None:
+    import asyncio
+
+    class Stream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            if first_delta:
+                yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            while True:
+                await asyncio.sleep(0.005)
+                yield b': keepalive\n\ndata: {"choices":[{"delta":{"content":null}}]}\n\n'
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    patch_client(monkeypatch, httpx.MockTransport(lambda _: httpx.Response(200, stream=stream)))
+    provider = OpenAICompatibleProvider(
+        base_url="https://example.test", api_key="test", model="m", timeout=0.04, max_retries=0
+    )
+    try:
+        async with asyncio.timeout(1):
+            with pytest.raises(ProviderTimeoutError):
+                await collect(provider)
+        assert stream.closed
+        assert not provider._client.is_closed  # A turn owns its response, not the shared client.
+    finally:
+        await provider.aclose()
+
+
+async def test_cancelling_http_stream_closes_response_but_preserves_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    entered, closed = asyncio.Event(), asyncio.Event()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            entered.set()
+            await asyncio.Event().wait()
+            yield b"unreachable"
+
+        async def aclose(self) -> None:
+            closed.set()
+
+    patch_client(monkeypatch, httpx.MockTransport(lambda _: httpx.Response(200, stream=Stream())))
+    provider = OpenAICompatibleProvider(base_url="https://example.test", api_key="test", model="m", timeout=1)
+    try:
+        task = asyncio.create_task(collect(provider))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed.is_set()
+        assert not provider._client.is_closed
+    finally:
+        await provider.aclose()
+
+
+async def test_partial_transport_failure_never_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise httpx.ReadError("connection lost")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=Stream())
+
+    patch_client(monkeypatch, httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://example.test", api_key="test", model="m", timeout=1)
+    try:
+        stream = provider.stream(messages())
+        assert await anext(stream) == "partial"
+        with pytest.raises(ProviderError):
+            await anext(stream)
+        assert calls == 1
+    finally:
+        await provider.aclose()
+
+
+async def test_truncated_provider_maps_to_one_sse_error_without_finish(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config import Settings
+    from app.schemas.chat import ChatRequest
+    from app.services.chat import ChatService
+    from app.services.rate_limit import MemoryRateLimiter
+
+    from tests.conftest import parse_sse
+
+    body = b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+    patch_client(monkeypatch, httpx.MockTransport(lambda _: httpx.Response(200, content=body)))
+    provider = OpenAICompatibleProvider(base_url="https://example.test", api_key="test", model="m", timeout=1)
+    try:
+        service = ChatService(provider, Settings(), MemoryRateLimiter())
+        frames = [frame async for frame in service.stream(ChatRequest(messages=messages()), "c", "request-test")]
+        events = parse_sse("".join(frames))
+        assert [event["type"] for event in events] == ["start", "delta", "error"]
+        assert events[-1]["code"] == 5030
+        assert events[-1]["requestId"] == "request-test"
+    finally:
+        await provider.aclose()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from typing import Any, NotRequired, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -15,6 +16,7 @@ from app.providers.types import TokenUsage
 from app.schemas.chat import ChatMessage, ChatToolCall
 from app.services.context import estimate_tokens
 from app.services.model_router import ModelRouter
+from app.services.streaming import ClosableIterator
 from app.tools.base import ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -139,22 +141,29 @@ class AgentWorkflow:
         """Expose graph node progress without leaking model reasoning."""
         current: dict[str, Any] = dict(state)
         emitted_results = 0
-        async for chunk in self.graph.astream(state, stream_mode="updates"):
-            for node, update_value in chunk.items():
-                update = cast(dict[str, Any], update_value)
-                current.update(update)
-                if node == "agent":
-                    for call in update.get("tool_calls", []):
-                        yield {
-                            "type": "tool_start",
-                            "tool": call["name"],
-                            "callId": call["id"],
-                        }
-                elif node == "tool":
-                    results = cast(list[dict[str, Any]], update.get("tool_results", []))
-                    for result in results[emitted_results:]:
-                        yield {"type": "tool_result", **result}
-                    emitted_results = len(results)
+        # The graph iterator may be suspended at tool_start when HTTP closes.
+        # Own it explicitly so graph tasks are joined before releasing the turn.
+        graph_events = cast(
+            ClosableIterator[dict[str, Any]],
+            self.graph.astream(state, stream_mode="updates"),
+        )
+        async with aclosing(graph_events):
+            async for chunk in graph_events:
+                for node, update_value in chunk.items():
+                    update = cast(dict[str, Any], update_value)
+                    current.update(update)
+                    if node == "agent":
+                        for call in update.get("tool_calls", []):
+                            yield {
+                                "type": "tool_start",
+                                "tool": call["name"],
+                                "callId": call["id"],
+                            }
+                    elif node == "tool":
+                        results = cast(list[dict[str, Any]], update.get("tool_results", []))
+                        for result in results[emitted_results:]:
+                            yield {"type": "tool_result", **result}
+                        emitted_results = len(results)
         if current["answer"]:
             yield {"type": "delta", "delta": current["answer"]}
         else:

@@ -83,6 +83,7 @@ def make_token(
     return jwt.encode(
         {
             "sub": subject,
+            "typ": "access",
             "name": name,
             "role": role,
             "plan": plan,

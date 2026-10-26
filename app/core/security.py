@@ -86,11 +86,14 @@ def authenticate(
             algorithms=["HS256"],
             audience=settings.jwt_audience,
             issuer=settings.jwt_issuer,
-            options={"require": ["exp", "iat", "sub"]},
+            options={"require": ["exp", "iat", "sub", "typ"]},
         )
     except InvalidTokenError as exc:
         # The reason (expired vs bad signature) is deliberately not exposed.
         raise AuthenticationError("Invalid or expired token") from exc
+
+    if payload.get("typ") != "access":
+        raise AuthenticationError("Invalid or expired token")
 
     subject = payload.get("sub")
     if not isinstance(subject, str) or not subject or len(subject) > 120:

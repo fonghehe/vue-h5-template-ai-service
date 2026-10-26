@@ -1,34 +1,51 @@
 # SSE 协议
 
-两个聊天端点均返回 `text/event-stream`，每帧是一行 `data:` 后跟紧凑 JSON，不使用命名 `event:`。`POST /api/ai/chat` 保留 `@vh5/ai-chat` 的四种原有类型。
+客户端使用 `fetch` 发送 JSON POST，并按 SSE 读取响应。两个聊天端点均返回 `text/event-stream`：每个事件由 `data:` 后的 JSON 和一个空行组成，不使用命名 `event:` 字段。
 
-| 类型 | 字段 | 端点 |
+## 事件类型
+
+| 类型 | 字段 | 使用范围 |
 |---|---|---|
-| `start` | `id` | 两者 |
-| `delta` | `delta` 文本 | 两者 |
-| `finish` | `reason` | 两者 |
-| `error` | `message`, optional `code`, `requestId` | 两者 |
-| `thinking_status` | 可展示给用户的 `status` | 持久化端点 |
-| `tool_start`、`tool_result` | `tool`、`callId`、可选 `result` | Agent |
-| `sources` | 引用数组 | RAG |
+| `start` | `id` | 两个聊天端点 |
+| `delta` | `delta` | 两个聊天端点 |
+| `finish` | `reason` | 两个聊天端点 |
+| `error` | `message`, `code?`, `requestId?` | 两个聊天端点 |
+| `thinking_status` | `status` | 仅持久化会话 |
+| `tool_start` | `tool`, `callId` | 仅 Agent 模式 |
+| `tool_result` | `tool`, `callId`, `result` | 仅 Agent 模式 |
+| `sources` | `sources[]` | 仅 RAG |
 
 ```text
 data: {"type":"start","id":"conversation-id"}
 
-data: {"type":"delta","delta":"你好"}
+data: {"type":"delta","delta":"Hello"}
 
 data: {"type":"finish","reason":"stop"}
 
 ```
 
-正常完成会发 `finish: stop`。schema 允许 `abort` 和 `error` reason，但当前路由失败时发送 `error` 事件；断连客户端通常收不到终止帧。新增事件只在持久化端点出现，不影响旧端点。
+## 完成与错误
 
-客户端用 `fetch` 发送 JSON POST 和 Authorization，关闭页面时取消请求。`guarded_stream` 检测断连，取消并等待唯一的待处理读取任务，并关闭直接流、Agent 和 Provider 迭代器。空闲时默认每 15 秒发送 `: heartbeat` SSE 注释，不新增 JSON 事件类型。整个流默认截止时间为 90 秒，包含上下文、工具、持久化和背压；发送另有 5 秒关闭余量。Agent 只做有界工具规划，最终答案直接逐片段输出。为持久化保留的正文受输出上限约束，每个片段先即时发送。
+成功时依次发送 `start`、零个或多个 `delta`，最后发送一个 `finish`，其中 `reason="stop"`。流开始后失败则发送 `error`。客户端收到任一终止事件后应结束读取。schema 还允许 `abort`、`error` 两种 finish reason，但当前路由不发送它们。
 
-流开始前的校验、认证、配额错误返回 HTTP 状态和 JSON 信封；开始后只能发 SSE `error`。响应包含 `Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`，代理需对两个聊天端点关闭缓冲。参见[部署](/zh/deployment)。
+流开始前的认证、校验或准入失败返回 HTTP 错误和标准 JSON 信封。客户端断连时可能收不到终止事件。收到 delta 后不要自动重放 POST，否则可能重复创建轮次或执行工具操作。
 
-## 清理异常路径
+## 超时、心跳与重试
 
-无状态聊天服务将 Provider 流的创建纳入错误边界。适配器同步创建失败时，在 `start` 后返回经过脱敏、带 Request ID 的 SSE `error`。等待上游时取消请求会继续传播取消并记录取消计数。即使 Provider 关闭失败，也会回收活跃流计数并记录耗时。
+| 配置 | 默认值 | 作用 |
+|---|---|---|
+| `AI_TIMEOUT_SECONDS` | 60 秒 | HTTP Provider 的传输超时；每次流尝试中也限制首个内容 token 和后续 token 的等待。注释、空 delta 不刷新 token 等待预算。 |
+| `AI_STREAM_TIMEOUT_SECONDS` | 90 秒 | 覆盖上下文、工具、持久化和客户端背压的轮次截止时间；HTTP 发送另有 5 秒终止余量。 |
+| `SSE_HEARTBEAT_SECONDS` | 15 秒 | 等待工作完成时发送 `: heartbeat` 注释，不属于 JSON 事件或模型 token。 |
 
-响应清理依次尝试关闭响应体迭代器、原始数据源，再释放属于当前 Token 的配额；前一项抛出异常也会继续尝试后续清理。清理异常仍会向外暴露，不会悄悄跳过其他资源。协议格式保持不变，断开的响应不会被当成成功完成。
+OpenAI 兼容适配器收到 `[DONE]` 或非空 `finish_reason` 才认定上游正常终止；缺少两者就 EOF 会报错。仅含 usage 的帧可以通过。瞬态故障可在首个内容 delta 前重试，次数受 `AI_PROVIDER_MAX_RETRIES` 限制；畸形帧和截断流不重试。
+
+## 取消与资源归属
+
+页面关闭时中止 fetch。服务最多保留一个待决上游读取；断连、超时或发送失败时，会取消读取、等待其结束，并关闭 guarded、Provider 和内层图迭代器。某项关闭失败仍会尝试其余清理。共享 HTTP 客户端由应用 lifespan 管理，不属于单个轮次。
+
+会话回答边生成边发送，只在输出上限内保留写库所需文本。完整助手回答、工具历史和用量一起提交成功后才发送 `finish`。中断轮次可能只留下已保存的用户消息。
+
+## 代理配置
+
+响应包含 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`。代理需要为两个聊天端点及其 `/api/v1` 别名关闭缓冲。参见[部署](./deployment.md)。

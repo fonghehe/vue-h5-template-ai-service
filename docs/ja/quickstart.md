@@ -2,13 +2,13 @@
 
 ## 必要な環境
 
-API は Python 3.12–3.14 と uv を使います。Node.js/npm は VitePress 文書のためだけに必要です。ルートは `pyproject.toml` と `uv.lock` の Python プロジェクトで、`package.json` と `package-lock.json` は `docs/` の中にあります。ルートに pnpm docs スクリプトはありません。
+API には Python 3.12–3.14 と uv が必要です。Node.js/npm は `docs/` の VitePress 文書だけに使います。
 
 ## オフライン起動
 
 ```bash
 cp .env.example .env
-uv sync --dev
+uv sync --frozen --dev
 uv run uvicorn app.main:app --reload --port 8001
 ```
 
@@ -22,7 +22,7 @@ curl -N http://localhost:8001/api/ai/chat -H 'Content-Type: application/json' -d
 
 ## 保存される会話
 
-`AI_AUTH_REQUIRED=false` でも、会話とナレッジベースは Go サービスが発行した**ユーザー JWT**を要求します。`SERVICE_TOKEN` ではユーザーデータを操作できません。このサービスは JWT を発行しません。
+`AI_AUTH_REQUIRED=false` でも、会話とナレッジベースは Go サービスが発行した**ユーザー access JWT**を要求します。`SERVICE_TOKEN` ではユーザーデータを操作できません。このサービスは JWT を発行しません。
 
 ```bash
 curl -s http://localhost:8001/api/conversations -H "Authorization: Bearer $AI_USER_JWT" -H 'Content-Type: application/json' -d '{"title":"最初の会話"}'
@@ -34,15 +34,4 @@ curl -s http://localhost:8001/api/conversations -H "Authorization: Bearer $AI_US
 
 `docker compose up --build` は API、Redis、PostgreSQL/pgvector を起動し、Alembic を先に実行します。Compose は `AI_AUTH_REQUIRED=true` なので上記の匿名 curl は 401 になります。Go サービスは含まれません。[デプロイ](/ja/deployment)も参照してください。
 
-```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy app
-cd docs
-npm ci
-npm run docs:dev
-npm run docs:build
-```
-
-文書の開発サーバーは API を起動しません。設定は[設定リファレンス](/ja/configuration)へ。
+テストと文書のプレビュー・build は[貢献ガイド](./contributing.md)を参照してください。文書サーバーは API を起動しません。環境変数は[設定](./configuration.md)にあります。

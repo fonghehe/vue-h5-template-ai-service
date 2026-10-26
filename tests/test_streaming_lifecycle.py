@@ -161,3 +161,79 @@ async def test_response_closes_source_even_when_body_cleanup_fails() -> None:
     assert body.closed
     assert source.closed
     assert await quota.acquire("user:u", 1) is not None
+
+
+async def test_disconnect_probe_cancels_pending_read_and_closes_source() -> None:
+    entered, closed = asyncio.Event(), asyncio.Event()
+
+    async def source() -> AsyncIterator[str]:
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+            yield "unreachable"
+        finally:
+            closed.set()
+
+    async def disconnected() -> bool:
+        return entered.is_set()
+
+    stream = guarded_stream(source(), disconnected=disconnected)
+    with pytest.raises(asyncio.CancelledError):
+        await anext(stream)
+    assert closed.is_set()
+
+
+async def test_tool_close_failure_does_not_skip_remaining_resources() -> None:
+    from app.tools.base import ToolRegistry
+    from app.tools.builtin import CurrentTimeTool
+
+    closed: list[str] = []
+
+    class ResourceTool(CurrentTimeTool):
+        def __init__(self, name: str, fail: bool = False) -> None:
+            self.name, self.fail = name, fail
+
+        async def aclose(self) -> None:
+            closed.append(self.name)
+            if self.fail:
+                raise RuntimeError("close failed")
+
+    registry = ToolRegistry([ResourceTool("one", fail=True), ResourceTool("two")])
+    with pytest.raises(RuntimeError, match="close failed"):
+        await registry.aclose()
+    assert closed == ["one", "two"]
+
+
+async def test_heartbeat_send_failure_joins_upstream_before_quota_release() -> None:
+    from app.api.streaming import QuotaStreamingResponse
+    from starlette.requests import ClientDisconnect
+
+    entered, closed = asyncio.Event(), asyncio.Event()
+
+    async def source() -> AsyncIterator[str]:
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+            yield "unreachable"
+        finally:
+            closed.set()
+
+    quota = StreamQuota()
+    token = await quota.acquire("u", 1)
+    assert token
+    response = QuotaStreamingResponse(
+        source(), quota=quota, identity="u", token=token, timeout=1, heartbeat=0.001, request_id="test"
+    )
+
+    async def receive() -> dict[str, object]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body":
+            assert entered.is_set()
+            raise OSError("heartbeat delivery failed")
+
+    with pytest.raises(ClientDisconnect):
+        await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+    assert closed.is_set()
+    assert quota._leases == {}

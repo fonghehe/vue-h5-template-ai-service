@@ -2,13 +2,13 @@
 
 ## Requirements
 
-Python 3.12–3.14 and `uv` run the API. Node.js and npm are needed only to work on the VitePress site. The root is a Python project (`pyproject.toml` + `uv.lock`); only `docs/` has `package.json` and `package-lock.json`. There is no pnpm script at the repository root.
+The API needs Python 3.12–3.14 and uv. Node.js/npm are needed only for the VitePress docs in `docs/`.
 
 ## Offline local run
 
 ```bash
 cp .env.example .env
-uv sync --dev
+uv sync --frozen --dev
 uv run uvicorn app.main:app --reload --port 8001
 ```
 
@@ -24,7 +24,7 @@ The response is `data: {"type":"start",...}`, zero or more `delta` frames, then 
 
 ## Persistent conversations
 
-These endpoints require a **user JWT** minted by the Go business service, even when `AI_AUTH_REQUIRED=false`. A `SERVICE_TOKEN` cannot access user-owned conversations. With a valid JWT:
+These endpoints require a **user access JWT** minted by the Go business service, even when `AI_AUTH_REQUIRED=false`. A `SERVICE_TOKEN` cannot access user-owned conversations. With a valid JWT:
 
 ```bash
 curl -s http://localhost:8001/api/conversations \
@@ -45,15 +45,4 @@ Compose starts the AI API, Redis and PostgreSQL with pgvector, runs `alembic upg
 
 ## Verification and docs
 
-```bash
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy app
-cd docs
-npm ci
-npm run docs:dev
-npm run docs:build
-```
-
-The docs dev server is a separate VitePress process; it does not start the API. CI additionally builds the Docker image. Continue with [Configuration](/configuration).
+For tests and docs preview/build commands, see [Contributing](./contributing.md). The docs server does not start the API. See [Configuration](./configuration.md) for environment settings.

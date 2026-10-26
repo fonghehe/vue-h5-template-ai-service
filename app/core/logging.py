@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from types import TracebackType
 
 from opentelemetry import trace
 
@@ -42,7 +44,21 @@ _RESERVED = {
 }
 
 
-class JsonFormatter(logging.Formatter):
+class SafeExceptionFormatter(logging.Formatter):
+    """Keep diagnostic locations, never exception values or submitted inputs."""
+
+    def formatException(
+        self,
+        ei: tuple[type[BaseException], BaseException, TracebackType | None] | tuple[None, None, None],
+    ) -> str:
+        kind, _, tb = ei
+        locations = [
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}' for frame in traceback.extract_tb(tb)
+        ]
+        return "\n".join(["Traceback (values omitted):", *locations, kind.__name__ if kind else "UnknownError"])
+
+
+class JsonFormatter(SafeExceptionFormatter):
     """Render log records as one JSON object per line."""
 
     def format(self, record: logging.LogRecord) -> str:
@@ -61,7 +77,7 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-class TextFormatter(logging.Formatter):
+class TextFormatter(SafeExceptionFormatter):
     """Render log records as `LEVEL message key=value` lines."""
 
     def format(self, record: logging.LogRecord) -> str:

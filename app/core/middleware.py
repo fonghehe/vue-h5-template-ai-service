@@ -16,6 +16,7 @@ from app.core.observability import HTTP_ACTIVE, HTTP_DURATION, HTTP_REQUESTS, sp
 
 logger = logging.getLogger(__name__)
 REQUEST_ID_HEADER = "X-Request-ID"
+_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"})
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
@@ -30,6 +31,7 @@ class RequestContextMiddleware:
         incoming = Headers(scope=scope).get(REQUEST_ID_HEADER, "")
         request_id = incoming if _ID.fullmatch(incoming) else str(uuid4())
         scope.setdefault("state", {})["request_id"] = request_id
+        method = scope["method"] if scope["method"] in _METHODS else "OTHER"
         started, status_code, received = time.perf_counter(), 500, 0
 
         async def limited_receive() -> Message:
@@ -54,7 +56,7 @@ class RequestContextMiddleware:
         HTTP_ACTIVE.inc()
         try:
             with (
-                request_scope(requestId=request_id, method=scope["method"]),
+                request_scope(requestId=request_id, method=method),
                 span("http.request", request_id=request_id),
             ):
                 await self.app(scope, limited_receive, contextual_send)
@@ -64,13 +66,13 @@ class RequestContextMiddleware:
             if route.startswith("/") and not route.startswith("/api/") and scope["path"].startswith("/api/"):
                 route = ("/api/v1" if scope["path"].startswith("/api/v1/") else "/api") + route
             HTTP_ACTIVE.dec()
-            HTTP_REQUESTS.labels(method=scope["method"], route=route, status=str(status_code)).inc()
-            HTTP_DURATION.labels(method=scope["method"], route=route).observe(duration)
+            HTTP_REQUESTS.labels(method=method, route=route, status=str(status_code)).inc()
+            HTTP_DURATION.labels(method=method, route=route).observe(duration)
             logger.info(
                 "http request completed",
                 extra={
                     "requestId": request_id,
-                    "method": scope["method"],
+                    "method": method,
                     "path": route,
                     "status": status_code,
                     "durationMs": round(duration * 1000, 2),

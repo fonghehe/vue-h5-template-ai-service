@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, aclosing
 from typing import cast
 
 import anyio
@@ -42,13 +42,16 @@ class QuotaStreamingResponse(StreamingResponse):
 
     async def _frames(self) -> AsyncIterator[str]:
         try:
-            async for frame in guarded_stream(
-                self._source,
-                deadline_seconds=self._timeout,
-                heartbeat_seconds=self._heartbeat,
-                disconnected=self._disconnected,
-            ):
-                yield ": heartbeat\n\n" if frame is None else frame
+            async with aclosing(
+                guarded_stream(
+                    self._source,
+                    deadline_seconds=self._timeout,
+                    heartbeat_seconds=self._heartbeat,
+                    disconnected=self._disconnected,
+                )
+            ) as frames:
+                async for frame in frames:
+                    yield ": heartbeat\n\n" if frame is None else frame
         except AppError as exc:
             yield encode_sse(ErrorChunk(message=exc.message, code=exc.code, requestId=self._request_id))
 

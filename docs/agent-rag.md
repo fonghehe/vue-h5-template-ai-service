@@ -14,12 +14,14 @@
 
 With `useRag=true`, a turn embeds the query, retrieves owner-scoped chunks, adds their text to context and emits `sources` with `documentId`, `chunkId`, `title`. A citation identifies retrieved material; it does not prove every answer claim. `assistant.rag` v1 asks for grounded answers.
 
+Upload metadata must be a JSON object. Parsing runs in a bounded worker thread, PDF signatures are validated, filenames are reduced to basenames, extracted text/chunk counts are capped, and embedding requests use batches of 64. Document and chunks commit together; SQLite enables foreign-key cascades. Untrusted PDFs with stringent isolation requirements need a separate resource-limited parsing worker.
+
 ## Structured output and evaluation
 
 `LLMProvider.structured_output()` validates against a Pydantic model; the HTTP adapter retries invalid JSON once. `ProductRecommendation` in `app/schemas/knowledge.py` is an example schema, not a public API response. `evals/run.py` is a small offline smoke script: one calculator case and non-empty mock completions, **not** a quantitative RAG benchmark. Pytest adds targeted retrieval/tool/schema checks. Green smoke results do not establish live model quality.
 
-Upload metadata must be a JSON object. Parsing runs in a bounded worker thread, PDF signatures are validated, filenames are reduced to basenames, extracted text/chunk counts are capped, and embedding requests use batches of 64. Document and chunks commit together; SQLite enables foreign-key cascades. Untrusted PDFs with stringent isolation requirements need a separate resource-limited parsing worker.
+## Context and storage limits
 
-## SQLite fallback ranking
+Context construction reserves space for the newest message before truncating summaries, retrieved documents or tool context. System messages also respect the shared per-message character limit. Large retrieval context therefore does not turn a short user question into an input-budget error.
 
-PostgreSQL continues to use its existing vector search. The SQLite fallback scores owner-scoped candidates and retains only the best `top_k` result objects with `heapq.nlargest`, rather than building and sorting a second full result list. Equal scores retain candidate order; citations and ownership filtering are unchanged. Ranking retains O(K) results and costs O(N log K) when K is small. Repository candidate loading and embedding computation still contribute their own memory and latency; this is not streaming database retrieval or an end-to-end model benchmark.
+PostgreSQL runs owner-scoped vector queries. SQLite loads owner-scoped candidates and ranks them in process; use PostgreSQL for production datasets.

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import aclosing
 from typing import Protocol, cast
 
 import anyio
@@ -30,7 +31,7 @@ async def guarded_stream[T](
     disconnected: Callable[[], Awaitable[bool]] | None = None,
     deadline_seconds: float = 90,
     heartbeat_seconds: float = 15,
-) -> AsyncIterator[T | None]:
+) -> AsyncGenerator[T | None, None]:
     """One pending read provides backpressure; None requests an SSE heartbeat.
 
     Closing/cancelling the consumer cancels and joins the read before closing
@@ -75,6 +76,9 @@ async def cancel_aware_stream(
     config: ModelConfig | None = None,
 ) -> AsyncIterator[str]:
     """Compatibility helper for direct provider streams."""
-    async for item in guarded_stream(provider.stream(messages, config), disconnected=request.is_disconnected):
-        if item is not None:
-            yield item
+    async with aclosing(
+        guarded_stream(provider.stream(messages, config), disconnected=request.is_disconnected)
+    ) as stream:
+        async for item in stream:
+            if item is not None:
+                yield item

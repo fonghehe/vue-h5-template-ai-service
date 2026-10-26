@@ -27,8 +27,7 @@ features:
     details: Text, Markdown and PDF ingestion with pgvector retrieval in PostgreSQL and citations.
 ---
 
-## What this repository owns
 
-This is a Python service, not a Vue application. The sibling Go business service owns login, token issuance and product CRUD. This service validates its JWTs, owns AI conversations, and calls the Go product API only through a registered tool. There is no `src/`, page router, frontend store, browser theme, i18n or mobile layout in this repository.
+## Start here
 
-Start with [local setup](/quickstart), then read [architecture](/architecture) and the [API reference](/api). The offline mock answers deterministically; it does **not** demonstrate real model quality or validate the live Go integration.
+Use [Quick start](./quickstart.md) to run the mock service, [API](./api.md) to connect a client, and [Deployment](./deployment.md) to prepare an environment. Go issues access JWTs; this service owns AI conversations and document retrieval. Mock responses verify the integration path, not real model quality.

@@ -1,34 +1,25 @@
 # Deployment
 
-## Local production-shaped stack
+## Local container stack
+
+`docker compose up --build` starts the API on `127.0.0.1:8001`, Redis 7 and PostgreSQL 17/pgvector. It runs migrations before Uvicorn, uses the mock model and requires chat authentication. Its credentials are local examples. The Go service is separate; `host.docker.internal:8002` assumes Docker Desktop or equivalent host mapping.
+
+## Production startup
+
+1. Provision PostgreSQL/pgvector and Redis; configure secrets through your deployment environment.
+2. Set staging/production settings from [Configuration](./configuration.md), including `DATABASE_AUTO_CREATE=false`. Match Go’s JWT secret, issuer and audience. Configure the real provider if required.
+3. Back up existing data and run migrations once before starting replicas. Do not run competing migrations in every replica.
+4. Start the service and check `/health` and `/ready`. Test the target Go product API’s service-token and `X-User-ID` policy separately.
 
 ```bash
-docker build -t vue-h5-template-ai-service:local .
-docker compose up --build
+uv run alembic upgrade head
+uv run alembic check
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001 --timeout-graceful-shutdown 100
 ```
 
-The non-root image listens on 8001. Compose starts Redis 7, PostgreSQL 17 with pgvector and the API. It runs `alembic upgrade head` before Uvicorn, enables auth and uses the mock model. Its credentials are **development examples**, not production secrets. The Go service is not included; `host.docker.internal:8002` assumes an external sibling process and may need host mapping outside Docker Desktop.
+## Proxy and shutdown
 
-For production, provision PostgreSQL/pgvector and Redis, set `DATABASE_URL=postgresql+asyncpg://...`, `DATABASE_AUTO_CREATE=false`, run `uv run alembic upgrade head` before serving, and keep embedding dimensions compatible with the migration/model. Replace example secrets, set real trusted hosts/CORS, `AI_AUTH_REQUIRED=true`, and match the Go JWT issuer settings. Confirm the receiving product API trusts the service token and `X-User-ID`; this repo alone cannot verify that integration.
-
-## Proxy, probes and observability
-
-Disable proxy buffering for **both** `/api/ai/chat` and `/api/conversations/{id}/messages`, keep a suitable read timeout and terminate TLS. The service already sets `X-Accel-Buffering: no` and `Cache-Control: no-cache, no-transform`.
-
-`/health` is process liveness and exposes backend names only. `/ready` concurrently checks Redis/limiter and the database with bounded timeouts and returns 503 on errors; it does not call a model or the Go service. Redis coordination errors fail closed with a safe 503 envelope. `/metrics` must be restricted at the proxy/network layer. `OTEL_ENABLED` installs tracing hooks without an exporter.
-
-## CI and docs site
-
-`.github/workflows/ci.yml` runs ruff, strict mypy, pytest with coverage and Docker build. `.github/workflows/deploy-docs.yml` runs `npm ci`, docs type-check/build and GitHub Pages deployment on main docs changes. Production VitePress base is `/vue-h5-template-ai-service/`; local dev uses `/`. See [Configuration](/configuration).
-
-
-## Operating the service
-
-Register schema changes with Alembic. The initial revision supports PostgreSQL/pgvector and SQLite, and the additive `20261002_0002` revision aligns ORM indexes. Upgrade before traffic; do not run competing migrations in every production replica. Use `alembic check` in CI to detect drift. Back up data before production upgrades; `downgrade base` is only a disposable-test operation.
-
-The default stream deadline is 90 seconds. Set Uvicorn graceful shutdown to at least deadline + 10 seconds and container stop grace to another 10 seconds. Compose uses `exec uvicorn` so SIGTERM reaches the server. For a changed deadline, adjust both grace periods.
-
-Trust forwarded headers only from your ingress IP/CIDR, for example `--proxy-headers --forwarded-allow-ips=10.0.0.10`; never blindly trust client-supplied X-Forwarded-For. Restrict direct service access to the ingress. Apply these proxy settings to legacy and versioned chat routes:
+Terminate TLS at the ingress. Disable buffering for legacy and `/api/v1` chat routes. The example below covers both; choose a read timeout longer than the heartbeat interval. Trust forwarded headers only from your ingress IP/CIDR, for example `--proxy-headers --forwarded-allow-ips=10.0.0.10`, and restrict direct API access.
 
 ```nginx
 location /api/ {
@@ -42,11 +33,24 @@ location /api/ {
 }
 ```
 
-The read timeout must exceed your heartbeat interval. Terminate TLS and allow only configured origins/hosts. Keep `/metrics` private. HTTP metrics include count, status, full response duration and active requests; route templates prevent cardinality growth from conversation IDs. Logs include service, environment and request ID; outbound provider/tool calls forward X-Request-ID without exposing credentials. `/api/usage/me` is approximate completed-turn usage, not a billing ledger.
+Keep Uvicorn’s shutdown grace at least 10 seconds above the stream deadline and the container stop grace another 10 seconds longer. Defaults are 90 / 100 / 110 seconds. Update all three together. Compose uses `exec uvicorn` so the server receives SIGTERM.
 
-CI runs real pgvector/Redis integration tests and migration round trips. `make integration` requires a disposable `vh5_ai_test` database and Redis DB 15. Use mocked upstream models; no live credentials are needed. Dependency audit command:
+## Probes and observability
 
-```bash
-uv export --frozen --no-dev --no-emit-project --no-hashes -o /tmp/ai-requirements.txt
-uvx --from pip-audit==2.10.1 pip-audit --no-deps --disable-pip -r /tmp/ai-requirements.txt
-```
+| Endpoint | Meaning |
+|---|---|
+| `/health` | Process liveness; does not establish dependency health. |
+| `/ready` | Bounded concurrent database and limiter probes; failures return 503. Does not call a model or Go. |
+| `/metrics` | Prometheus metrics when enabled; restrict at the proxy/network layer. |
+
+HTTP metrics use route templates and standard methods; other methods share `OTHER`. Logs include request IDs, and provider/tool requests forward `X-Request-ID`. Exception logs retain types and stack locations but omit exception values and chained messages. Log messages and extra fields must still avoid secrets.
+
+`OTEL_ENABLED` configures tracing without an exporter. Integrate an exporter and sampling policy with your observability stack; turning on the setting alone does not export traces.
+
+## Operational limits
+
+- Daily usage is an estimate of completed persistent turns, not billing; concurrent requests can exceed the admission threshold.
+- PDF parsing uses bounded worker threads, not process isolation. Untrusted large-scale uploads need a resource-limited parser process or worker.
+- Default pools and limits are starting settings, not measured production capacity. Validate model, Go, proxy disconnects, backups and rolling shutdown in your target environment.
+
+For isolated integration tests, migration checks and local benchmarks, see [Contributing](./contributing.md).

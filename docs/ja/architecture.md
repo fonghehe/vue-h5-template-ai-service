@@ -1,40 +1,37 @@
 # アーキテクチャ
 
-このリポジトリにはフロントエンドの `src/`、画面、クライアントルーター、store、composable、UI コンポーネント、CSS テーマはありません。別リポジトリの `@vh5/ai-chat` が旧 SSE エンドポイントを利用します。
+Vue クライアントはこの FastAPI サービスから SSE を読み取ります。別の Go サービスが access JWT の発行と商品 API を担当します。本サービスはトークンを検証し、AI 会話と文書を保存し、必要に応じて登録済みツールを呼び出します。
 
 ```text
-Vue / @vh5/ai-chat -> /api/ai/chat -> FastAPI -> LLMProvider -> SSE
-Go ビジネスサービス -> JWT 発行 / 商品 API
-ユーザー JWT -> /api/conversations/{id}/messages -> ContextBuilder -> 直接 LLM ストリーム
-                                                             | agent/auto
-                                                             v
-                                                       LangGraph -> ToolRegistry
-                                                                        |
-                                                          search_product -> Go
-ユーザー JWT -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
-Redis -> リクエスト数、同時ストリーム、会話ロック
+Vue -> FastAPI routes -> Services -> LLM / Embedding providers
+                            |----> Repositories -> PostgreSQL / pgvector
+                            |----> Agent -> ToolRegistry -> Go product API
+                            `----> Redis: counters / stream leases / locks
+Go -> access JWT -> FastAPI authentication
 ```
 
-## モジュール
+## モジュールの責務
 
 | パス | 責務 |
 |---|---|
-| `app/main.py` | FastAPI ファクトリー、lifespan、ミドルウェア、エラー形式 |
-| `app/api/v1/` | chat、conversation、knowledge、usage、probe の HTTP/SSE 境界 |
-| `app/schemas/` | Pydantic の公開契約と SSE フレーム |
-| `app/core/` | 設定、JWT、エラー、ログ、可観測性 |
-| `app/providers/` | 中立的な LLM/Embedding と Mock/HTTP アダプター |
-| `app/services/` | コンテキスト、プロンプト、モデル選択、Agent、検索、制限、キャンセル |
-| `app/tools/` | 許可リストにあるツールと引数検証 |
-| `app/db/` | SQLAlchemy async と所有者を確認するリポジトリ |
-| `alembic/`、`evals/`、`tests/` | マイグレーション、オフライン簡易評価、pytest |
+| `app/main.py` | アプリの生成と lifespan のリソース管理 |
+| `app/api/` | HTTP/SSE 通信と依存関係 |
+| `app/schemas/` | 公開リクエスト・応答・イベントの契約 |
+| `app/services/` | 会話、コンテキスト、Agent、検索、制限の処理 |
+| `app/providers/` | ベンダーに依存しない LLM/Embedding インターフェースとアダプター |
+| `app/tools/` | 登録済みツールと引数検証 |
+| `app/db/` | 非同期 Session、モデル、所有者を確認する Repository |
+| `app/core/` | 設定、JWT 検証、エラー、可観測性 |
+| `alembic/`、`tests/`、`evals/` | マイグレーション、動作テスト、オフライン簡易評価 |
 
-## 処理とデータ
+## トランザクションとリソース
 
-`create_app()` は TrustedHost、CORS、リクエスト ID、ルート、例外処理を登録します。lifespan は Provider、Embedding、DB、リミッター、ロック、ツール、ワークフローを生成します。旧 `/api/ai/chat` はクライアントの `messages[]` を受け取り保存しません。新しい会話ルートは JWT の所有者を検証し、ユーザーメッセージを保存し、制限付きコンテキストを構築して直接ストリームまたは Agent に送ります。正常終了後にアシスタントメッセージと使用量を保存します。切断後にユーザーメッセージだけ残る場合があります。
+Repository は flush のみを行い、Service が commit と rollback を決めます。会話は短いトランザクションでユーザーメッセージを保存し、そのトランザクションを保持せずにコンテキスト構築と生成を進め、最後に完成した回答と使用量を一括保存します。[会話](./conversations.md)を参照してください。
 
-JSON エラーは `{code,message,data,error,requestId}`、SSE 開始後のエラーは `error` フレームです。PostgreSQL は会話・文書・ベクトル・使用量を保存し、SQLite はローカル/テスト用です。Redis 未設定ならカウンター・ロックはプロセス内だけです。Go サービスはこのリポジトリに含まれず、商品ツールは設定済みベース URL の `/api/v1/products` だけを呼びます。実際の Go 側契約は別途検証が必要です。[会話](/ja/conversations)、[Agent/RAG](/ja/agent-rag)、[拡張](/ja/extending)も参照してください。
+lifespan は生成直後にリソースの終了処理を登録し、起動途中の失敗にも対応します。HTTP/Redis クライアントは共有し、Session と応答ストリームはリクエスト・ターン単位で管理します。SSE ラッパーは内部イテレーターを明示的に閉じます。[SSE](./sse.md)も参照してください。
 
-## Transaction とリソース所有権
+## 保存と複数レプリカの調整
 
-HTTP -> pure ASGI context/size middleware -> Router/Dependency -> ChatService または ConversationService -> Repository/Provider。`AsyncExitStack` が各リソース生成直後に終了処理を登録し、起動途中の失敗にも対応します。Repository は flush のみ、Service が transaction を管理します。短い Session を使い、要約と最終モデル生成の前に接続を返します。tool 履歴・回答・使用量を一括 commit してから finish を送ります。中断時は user message だけ残る場合があります。Redis は共有の制限付き pool、token ごとの期限付き stream lease と会話 lock を使います。ASGI 計測は SSE 全体、ContextVar ログはリクエストごとに独立します。
+PostgreSQL/pgvector は会話、文書、ベクトル、使用量を保存し、SQLite はローカル・テスト用です。Redis はリクエスト数、同時ストリームのリース、会話ロックをレプリカ間で共有します。未設定ならプロセス内のみの調整です。staging/production は Redis と PostgreSQL が必須です。
+
+商品ツールは設定済み Go URL の `/api/v1/products` だけを呼びます。接続先のトークンと `X-User-ID` の検証方針は別途確認してください。[Agent と RAG](./agent-rag.md)、[拡張ガイド](./extending.md)も参照できます。

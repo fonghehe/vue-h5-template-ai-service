@@ -1,47 +1,37 @@
 # Architecture
 
-The repository has no frontend `src/`, pages, client router, stores, composables, UI components, CSS theme or frontend API wrapper. `@vh5/ai-chat` lives elsewhere and consumes this service's legacy SSE endpoint. This repository is the FastAPI half of the backend pair.
+The Vue client reads SSE from this FastAPI service. The sibling Go service issues access JWTs and owns product APIs. This service validates those tokens, stores AI conversations and documents, and optionally calls registered tools.
 
 ```text
-Vue / @vh5/ai-chat -> POST /api/ai/chat -> FastAPI -> LLMProvider -> SSE
-Go business service -> JWT issuer / product API
-JWT user -> /api/conversations/{id}/messages -> ContextBuilder -> direct LLM stream
-                                                    | mode=agent / auto trigger
-                                                    v
-                                               LangGraph -> ToolRegistry
-                                                              |
-                                                        search_product -> Go
-JWT user -> /api/knowledge/documents -> embedding -> PostgreSQL + pgvector
-Redis -> request counter, stream quota, conversation lock
+Vue -> FastAPI routes -> Services -> LLM / Embedding providers
+                            |----> Repositories -> PostgreSQL / pgvector
+                            |----> Agent -> ToolRegistry -> Go product API
+                            `----> Redis: counters / stream leases / locks
+Go -> access JWT -> FastAPI authentication
 ```
 
-## Actual module boundaries
+## Module responsibilities
 
 | Path | Responsibility |
 |---|---|
-| `app/main.py` | FastAPI factory, lifespan dependencies, middleware and error envelope |
-| `app/api/v1/` | HTTP/SSE routes only: chat, conversations, knowledge, usage and probes |
-| `app/schemas/` | Pydantic request/response models and SSE frame types |
-| `app/core/` | settings, JWT, errors, logging and observability |
-| `app/providers/` | provider-neutral LLM/embedding interfaces and mock/HTTP adapters |
-| `app/services/` | context, prompts, model routing, LangGraph, retrieval, quotas and cancellation |
-| `app/tools/` | allow-listed Pydantic-validated tools |
-| `app/db/` | SQLAlchemy async models, sessions and owner-scoped repositories |
-| `alembic/` | PostgreSQL migrations; `evals/` contains a small offline smoke dataset |
-| `tests/` | pytest behavior and contract tests |
+| `app/main.py` | Application factory and lifespan resources |
+| `app/api/` | HTTP/SSE transport and dependencies |
+| `app/schemas/` | Public request, response and event contracts |
+| `app/services/` | Conversation, context, agent, retrieval and quota orchestration |
+| `app/providers/` | Provider-neutral LLM/embedding interfaces and adapters |
+| `app/tools/` | Registered tools and argument validation |
+| `app/db/` | Async sessions, models and owner-scoped repositories |
+| `app/core/` | Settings, JWT validation, errors and observability |
+| `alembic/`, `tests/`, `evals/` | Migrations, behavior tests and offline smoke evaluation |
 
-## Request flow
+## Transactions and resources
 
-`create_app()` installs trusted-host and CORS middleware, a request ID, API routes and exception handlers. Lifespan creates the provider, embedding adapter, database, limiter, locks, tool registry and workflow. The legacy `/api/ai/chat` accepts client-supplied `messages[]` and does not persist them. The newer conversation route authorizes a JWT subject, saves the user message, builds a bounded context, then streams or runs the agent. A completed turn saves one assistant message and a `UsageRecord`. A disconnect can leave a saved user message without an assistant reply; consumers must tolerate that state.
+Repositories flush changes; services decide when to commit or roll back. Conversation requests save the user message in a short transaction, build context and generate without holding that transaction open, then commit the completed reply and usage together. See [Conversations](./conversations.md).
 
-The JSON error envelope is `{code,message,data,error,requestId}`. Once SSE headers are sent, errors use an `error` frame. Read [SSE](/sse) for the exact wire format.
+Lifespan registers cleanup immediately after resource creation, including partial startup failure. HTTP and Redis clients are shared; sessions and response streams have request/turn scope. SSE wrappers explicitly close nested iterators. See [SSE](./sse.md).
 
-## Data and service boundaries
+## Storage and replica coordination
 
-PostgreSQL stores conversations, messages, documents, chunks, embeddings and usage. The migration enables `vector`; SQLite is a local/test fallback with JSON vectors and in-process cosine search. Redis is optional locally; without it, rate counters, stream quota and conversation locks are per process. For multiple replicas, configure Redis. The separate Go service issues JWTs and serves products; this repo does not implement its CRUD. The product tool uses one configured base URL and a fixed `/api/v1/products` path, not a model-selected URL. Live compatibility with a particular Go deployment must be checked separately.
+PostgreSQL/pgvector stores conversations, documents, vectors and usage. SQLite is the local/test fallback. Redis shares request counts, concurrent-stream leases and conversation locks across replicas; without it, coordination is process-local. Staging/production require Redis and PostgreSQL.
 
-See [Conversations](/conversations), [Agent and RAG](/agent-rag), and [Extending](/extending).
-
-## Transactions and resource ownership
-
-HTTP -> pure ASGI context/size middleware -> Router/Dependency -> ChatService or ConversationService -> repositories/providers. `AsyncExitStack` registers closure immediately after allocation, including partial startup failure. Repositories flush without committing; services own transaction boundaries. Conversations use short sessions and release connections before context summarization and final model generation. A completed turn commits tool history, assistant text and usage together before `finish`; cancellation can leave a saved user message. Redis provides one shared bounded connection pool, token-owned expiring stream leases and conversation mutexes. ASGI timing covers full SSE delivery; ContextVar logs isolate concurrent requests.
+The product tool calls the fixed `/api/v1/products` path under the configured Go base URL. Validate the target deployment’s token and `X-User-ID` policy separately. See [Agent and RAG](./agent-rag.md) and [Extending](./extending.md).

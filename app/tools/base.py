@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AsyncExitStack
 from typing import Any
 
 from pydantic import BaseModel
@@ -56,5 +57,6 @@ class ToolRegistry:
         return await tool.run(arguments, context)
 
     async def aclose(self) -> None:
-        for tool in self._tools.values():
-            await tool.aclose()
+        async with AsyncExitStack() as cleanup:
+            for tool in reversed(list(self._tools.values())):
+                cleanup.push_async_callback(tool.aclose)

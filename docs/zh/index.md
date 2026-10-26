@@ -25,8 +25,7 @@ features:
     details: txt、md、pdf 入库；PostgreSQL/pgvector 检索并返回来源。
 ---
 
-## 仓库职责
 
-这是 Python AI 服务，不是 Vue 前端。兄弟 Go 服务负责登录、签发 JWT 和商品 CRUD；本服务验证 JWT、保存 AI 会话，并只通过注册工具访问 Go 商品 API。这里没有 `src/`、页面路由、前端 store、浏览器主题、国际化或移动布局。
+## 从这里开始
 
-先看[快速开始](/zh/quickstart)、[架构](/zh/architecture)和 [API](/zh/api)。离线 Mock 只验证传输与业务流程，不能证明真实模型质量或 Go 服务已经集成成功。
+按[快速开始](./quickstart.md)运行 Mock 服务，通过 [API](./api.md)接入客户端，准备部署时阅读[部署指南](./deployment.md)。Go 负责签发 access JWT，本服务负责 AI 会话与文档检索。Mock 回答可用于验证接入流程，不代表真实模型质量。
