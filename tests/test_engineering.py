@@ -231,3 +231,44 @@ def test_settings_repr_and_validation_do_not_expose_secrets() -> None:
     with pytest.raises(ValidationError) as error:
         Settings(jwt_secret=marker, ai_timeout_seconds=0)
     assert marker not in str(error.value) and "input_value" not in str(error.value)
+
+
+def test_pdf_upload_extracts_text_with_real_parser(client: TestClient) -> None:
+    import io
+
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(b"BT /F1 12 Tf 20 100 Td (A camera costs 499 yuan.) Tj ET")
+    page[NameObject("/Contents")] = content
+    with io.BytesIO() as buffer:
+        writer.write(buffer)
+        pdf = buffer.getvalue()
+    writer.close()
+
+    headers = auth_header(make_token())
+    response = client.post(
+        "/api/knowledge/documents",
+        headers=headers,
+        files={"file": ("catalog.pdf", pdf, "application/pdf")},
+    )
+    assert response.status_code == 200
+    document = response.json()["data"]
+    assert document["title"] == "catalog"
+    # The real parser's text reaches the embedding/retrieval path.
+    from app.services.knowledge import _parse_document
+
+    assert "A camera costs 499 yuan." in _parse_document("catalog.pdf", "application/pdf", pdf)
